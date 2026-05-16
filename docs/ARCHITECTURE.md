@@ -88,7 +88,7 @@ helm list -A
 | cilium-ingress-nginx | ingress-nginx ~>4.15 | cilium-ingress-nginx | class: cilium-nginx, `externalTrafficPolicy=Local` |
 | echo-server-nginx | ealenn/echo-server ~>0.5 | echo-server-nginx | spot toleration |
 | echo-server-cilium | ealenn/echo-server ~>0.5 | echo-server-cilium | spot toleration |
-| kubeview | benc-uk/kubeview | kubeview | LB enabled |
+| kubeview | benc-uk/kubeview (local chart: `charts/kubeview`) | kubeview | LB enabled |
 
 ### Cilium config (from `terraform/helm.tf` locals)
 

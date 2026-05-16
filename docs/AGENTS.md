@@ -9,6 +9,8 @@ terraform/
 ├── terraform.tfvars.example  # Template (copy to terraform.tfvars, never commit)
 ├── aks.tf               # AKS cluster + spot node pool
 ├── helm.tf              # All Helm releases (cert-manager, nginx, Cilium, echo-server, kubeview)
+charts/
+└── kubeview/            # Local copy of kubeview chart (no published Helm repo)
 └── k8s-manifests.tf     # ClusterIssuers, Ingresses, provider configs for helm/kubernetes
 docs/
 ├── ARCHITECTURE.md      # System design, topology, debugging chronicle
