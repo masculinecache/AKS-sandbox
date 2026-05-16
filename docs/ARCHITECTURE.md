@@ -37,6 +37,27 @@ All ingress traffic follows the same path:
 Client → Azure LB (DSR) → Node → Cilium KPR → Pod IP
 ```
 
+## Namespace reference
+
+| Namespace | What runs there | Why it exists |
+|---|---|---|
+| `ingress-nginx` | Default ingress controller (class: `nginx`) | Serves `phillias-nginx.*` — the primary ingress for the cluster. Installed first, kept as-is. |
+| `cilium` | Cilium agent, operator, Envoy (Cilium ingress controller) | CNI chaining + kube-proxy replacement. The Cilium Ingress Controller is deployed here but **does not serve traffic externally** — Azure DSR/Floating IP prevents eBPF TPROXY from working. |
+| `cilium-ingress-nginx` | Second ingress controller (class: `cilium-nginx`) | Serves `phillias-cilium.*` — a separate nginx controller to work around the DSR issue above. Same chart as `ingress-nginx` but with a different ingress class and its own LoadBalancer. |
+| `cert-manager` | cert-manager controller + CRDs | Automatic Let's Encrypt TLS for both domains. Creates solver ingresses during HTTP-01 challenges. |
+| `echo-server-nginx` | echo-server pod | Test application behind the default nginx ingress. |
+| `echo-server-cilium` | echo-server pod | Test application behind the cilium-nginx ingress. |
+| `kubeview` | kubeview pod | Cluster visualizer UI, accessible on its own LoadBalancer. |
+| `kube-system` | System pods (CoreDNS, metrics-server, etc.) | Standard AKS system namespace. |
+| `default` | (empty) | Unused — all workloads are in named namespaces. |
+
+### Namespace design principles
+
+- **One ingress class per controller namespace** — `ingress-nginx` owns class `nginx`, `cilium-ingress-nginx` owns class `cilium-nginx`. No controller watches ingresses from the other class.
+- **App namespaces match their ingress class** — `echo-server-nginx` uses class `nginx`, `echo-server-cilium` uses class `cilium-nginx`. This makes it obvious which ingress controller serves which app.
+- **cert-manager has its own namespace** — standard practice. It creates solver ingresses in the target app's namespace during HTTP-01 challenges.
+- **Cilium shares its namespace with the broken ingress controller** — the Cilium Ingress Controller lives in `cilium` but is effectively unused for external traffic. It remains deployed because removing it would require changing Cilium Helm values (`ingressController.enabled=true`), and it doesn't interfere with anything.
+
 ## Verifications
 
 ### Health checks
