@@ -224,8 +224,7 @@ resource "helm_release" "echo_server_cilium" {
 # ── kubeview ──────────────────────────────────────────────────────────────────
 resource "helm_release" "kubeview" {
   name             = "kubeview"
-  repository       = "https://benc-uk.github.io/kubeview"
-  chart            = "kubeview"
+  chart            = "${path.module}/../charts/kubeview"
   namespace        = "kubeview"
   create_namespace = true
 

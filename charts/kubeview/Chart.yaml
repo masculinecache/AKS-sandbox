@@ -1,0 +1,16 @@
+apiVersion: v2
+name: kubeview
+type: application
+version: 2.0.6
+appVersion: '2.2.0'
+
+description: Kubernetes cluster visualiser and visual explorer
+maintainers:
+  - name: Ben Coleman
+    url: https://github.com/benc-uk/
+    email: benc.uk@gmail.com
+
+icon: https://raw.githubusercontent.com/benc-uk/kubeview/main/frontend/img/icon.png
+home: https://github.com/benc-uk/kubeview
+sources:
+  - https://github.com/benc-uk/kubeview
