@@ -122,26 +122,63 @@ Azure DNS labels (`cloudapp.azure.com`) are used instead of custom domains.
 ### Single ingress controller
 Both apps share `ingress-nginx`. The `echo-cilium` name is retained for historical continuity but routes through the same nginx ingress class.
 
-## Deployment from scratch
+## Deployment workflow (two-phase apply)
+
+`kubernetes_manifest` resources require the AKS cluster to exist before they can be planned. On a fresh cluster, Terraform cannot validate the provider config at plan time. The deployment is therefore split into phases.
+
+### Using the deploy script (recommended)
+
+```bash
+./scripts/apply.sh             # phases 1 + 2 + 3
+./scripts/apply.sh --phase 1   # infra only
+./scripts/apply.sh --phase 2   # helm releases only (cluster must exist)
+./scripts/apply.sh --plan      # plan all phases (dry-run)
+```
+
+### Manual phased apply
 
 ```bash
 cd terraform
 cp terraform.tfvars.example terraform.tfvars
 # edit subscription_id
-
 terraform init
-terraform plan
-terraform apply  # creates AKS + all Helm releases + manifests (~15 min)
 
-# After apply, wait for TLS certs
+# Phase 1 — create cluster and node pool (~8 min)
+terraform apply -auto-approve \
+  -target=azurerm_resource_group.main \
+  -target=azurerm_kubernetes_cluster.main \
+  -target=azurerm_kubernetes_cluster_node_pool.spot
+
+# Phase 2 — deploy Helm releases (~2 min)
+terraform apply -auto-approve \
+  -target=helm_release.cert_manager \
+  -target=helm_release.ingress_nginx \
+  -target=helm_release.echo_nginx \
+  -target=helm_release.echo_cilium
+
+# Phase 3 — ClusterIssuer + Ingresses (~30s)
+terraform apply -auto-approve
+```
+
+After Phase 3, cert-manager handles Let's Encrypt HTTP-01 challenges asynchronously. Check progress:
+
+```bash
 kubectl get certificate -A
 ```
+
+### Why phases are needed
+
+| Phase | Resources | Why separate |
+|---|---|---|
+| 1 | Resource group, AKS cluster, node pool | These don't need the Kubernetes API; they create the cluster that everything else depends on. |
+| 2 | Helm releases (cert-manager, ingress-nginx, echo-server) | cert-manager must be fully deployed and its CRDs registered before `ClusterIssuer` can be created. A `time_sleep.wait_for_crds` (30s) provides a safety window between Phases 2 and 3. |
+| 3 | ClusterIssuer, Ingresses | Requires both the cluster (API) and cert-manager CRDs. The plan now succeeds because both the cluster and providers are known to Terraform state. |
 
 ## Cleanup
 
 ```bash
-cd terraform
-terraform destroy
-# If that leaves resource group behind:
-az group delete --name rg-sandbox-aks --yes --no-wait
+./scripts/destroy.sh
+# or manually:
+# cd terraform && terraform destroy
+# az group delete --name rg-sandbox-aks --yes --no-wait
 ```

@@ -15,6 +15,13 @@ resource "helm_release" "cert_manager" {
   ]
 }
 
+# Give cert-manager's CRDs time to register before creating ClusterIssuer.
+resource "time_sleep" "wait_for_crds" {
+  create_duration = "30s"
+
+  depends_on = [helm_release.cert_manager]
+}
+
 # ── ingress-nginx (default) ───────────────────────────────────────────────────
 resource "helm_release" "ingress_nginx" {
   name             = "ingress-nginx"

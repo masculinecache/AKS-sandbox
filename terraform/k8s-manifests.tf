@@ -43,7 +43,10 @@ resource "kubernetes_manifest" "letsencrypt" {
     }
   }
 
-  depends_on = [helm_release.cert_manager]
+  depends_on = [
+    helm_release.cert_manager,
+    time_sleep.wait_for_crds
+  ]
 }
 
 # ── Ingresses ─────────────────────────────────────────────────────────────────

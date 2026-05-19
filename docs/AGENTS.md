@@ -10,9 +10,12 @@ terraform/
 ├── aks.tf               # AKS cluster + spot node pool
 ├── helm.tf              # All Helm releases (cert-manager, ingress-nginx, echo-server)
 └── k8s-manifests.tf     # ClusterIssuers, Ingresses, provider configs for helm/kubernetes
+scripts/
+├── apply.sh             # Three-phase deploy wrapper
+└── destroy.sh           # Cleanup wrapper
 docs/
 ├── ARCHITECTURE.md      # System design, topology, debugging chronicle
-└── AGENTS.md            # This file — codebase guide for agents
+├── AGENTS.md            # This file — codebase guide for agents
 README.md                # Project overview, deployment instructions
 ```
 
@@ -51,17 +54,43 @@ terraform plan -out=tfplan
 # Review the plan before applying
 ```
 
-### Applying
+### Applying (three phases)
+
+`kubernetes_manifest` resources cannot be planned before the AKS cluster exists.
+Use the wrapper script to handle the phases:
 
 ```bash
-terraform apply tfplan
-# or directly:
-terraform apply
+./scripts/apply.sh     # phases 1 + 2 + 3
+```
+
+Or manually:
+
+```bash
+cd terraform
+
+# Phase 1 — cluster infra
+terraform apply -auto-approve \
+  -target='azurerm_resource_group.main' \
+  -target='azurerm_kubernetes_cluster.main' \
+  -target='azurerm_kubernetes_cluster_node_pool.spot'
+
+# Phase 2 — helm releases
+terraform apply -auto-approve \
+  -target='helm_release.cert_manager' \
+  -target='helm_release.ingress_nginx' \
+  -target='helm_release.echo_nginx' \
+  -target='helm_release.echo_cilium'
+
+# Phase 3 — manifests (cluster + CRDs now exist)
+terraform apply -auto-approve
 ```
 
 ### Destroying
 
 ```bash
+./scripts/destroy.sh
+# or manually:
+cd terraform
 terraform destroy
 # If resource group remains (stale NSG/LB):
 az group delete --name rg-sandbox-aks --yes --no-wait
@@ -155,6 +184,26 @@ resource "kubernetes_manifest" "ingress_my_app" {
   ]
 }
 ```
+
+### Dependency chain
+
+The apply order is critical:
+
+```
+azurerm_resource_group.main
+  └── azurerm_kubernetes_cluster.main
+        ├── azurerm_kubernetes_cluster_node_pool.spot
+        ├── helm_release.cert_manager
+        │     └── time_sleep.wait_for_crds  (30s delay for CRD registration)
+        │           └── kubernetes_manifest.letsencrypt
+        ├── helm_release.ingress_nginx
+        │     ├── helm_release.echo_nginx
+        │     └── helm_release.echo_cilium
+        └── kubernetes_manifest.ingress_echo_nginx
+        └── kubernetes_manifest.ingress_echo_cilium
+```
+
+The `time_sleep` resource is the key fix for the cert-manager CRD race condition — without it, `kubernetes_manifest.letsencrypt` fails with "no matches for kind 'ClusterIssuer'" because the CRDs haven't been registered yet by the API server, even though the Helm release reports as deployed.
 
 ## Gotchas
 
