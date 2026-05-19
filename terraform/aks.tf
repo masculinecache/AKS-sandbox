@@ -16,11 +16,11 @@ resource "azurerm_kubernetes_cluster" "main" {
   kubernetes_version  = var.kubernetes_version
 
   default_node_pool {
-    name                = "nodepool1"
-    vm_size             = var.system_node_vm_size
-    node_count          = var.system_node_count
-    os_disk_size_gb     = 128
-    type                = "VirtualMachineScaleSets"
+    name                 = "nodepool1"
+    vm_size              = var.system_node_vm_size
+    node_count           = var.system_node_count
+    os_disk_size_gb      = 128
+    type                 = "VirtualMachineScaleSets"
     orchestrator_version = var.kubernetes_version
   }
 
@@ -29,7 +29,7 @@ resource "azurerm_kubernetes_cluster" "main" {
   }
 
   network_profile {
-    network_plugin      = "azure"
+    network_plugin    = "azure"
     load_balancer_sku = "standard"
     service_cidr      = "10.0.0.0/16"
     dns_service_ip    = "10.0.0.10"

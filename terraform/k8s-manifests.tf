@@ -46,36 +46,6 @@ resource "kubernetes_manifest" "letsencrypt" {
   depends_on = [helm_release.cert_manager]
 }
 
-resource "kubernetes_manifest" "letsencrypt_cilium" {
-  manifest = {
-    apiVersion = "cert-manager.io/v1"
-    kind       = "ClusterIssuer"
-    metadata = {
-      name = "letsencrypt-cilium"
-    }
-    spec = {
-      acme = {
-        email  = var.acme_email
-        server = "https://acme-v02.api.letsencrypt.org/directory"
-        privateKeySecretRef = {
-          name = "letsencrypt-cilium-account-key"
-        }
-        solvers = [
-          {
-            http01 = {
-              ingress = {
-                class = "cilium-nginx"
-              }
-            }
-          }
-        ]
-      }
-    }
-  }
-
-  depends_on = [helm_release.cert_manager]
-}
-
 # ── Ingresses ─────────────────────────────────────────────────────────────────
 
 resource "kubernetes_manifest" "ingress_echo_nginx" {
@@ -93,7 +63,7 @@ resource "kubernetes_manifest" "ingress_echo_nginx" {
       ingressClassName = "nginx"
       rules = [
         {
-          host = "phillias-nginx.centralus.cloudapp.azure.com"
+          host = "echo-nginx.centralus.cloudapp.azure.com"
           http = {
             paths = [
               {
@@ -114,7 +84,7 @@ resource "kubernetes_manifest" "ingress_echo_nginx" {
       ]
       tls = [
         {
-          hosts      = ["phillias-nginx.centralus.cloudapp.azure.com"]
+          hosts      = ["echo-nginx.centralus.cloudapp.azure.com"]
           secretName = "echo-nginx-tls"
         }
       ]
@@ -135,14 +105,14 @@ resource "kubernetes_manifest" "ingress_echo_cilium" {
       name      = "echo-server-cilium"
       namespace = "echo-server-cilium"
       annotations = {
-        "cert-manager.io/cluster-issuer" = "letsencrypt-cilium"
+        "cert-manager.io/cluster-issuer" = "letsencrypt"
       }
     }
     spec = {
-      ingressClassName = "cilium-nginx"
+      ingressClassName = "nginx"
       rules = [
         {
-          host = "phillias-cilium.centralus.cloudapp.azure.com"
+          host = "echo-cilium.centralus.cloudapp.azure.com"
           http = {
             paths = [
               {
@@ -163,7 +133,7 @@ resource "kubernetes_manifest" "ingress_echo_cilium" {
       ]
       tls = [
         {
-          hosts      = ["phillias-cilium.centralus.cloudapp.azure.com"]
+          hosts      = ["echo-cilium.centralus.cloudapp.azure.com"]
           secretName = "echo-cilium-tls"
         }
       ]
@@ -171,7 +141,7 @@ resource "kubernetes_manifest" "ingress_echo_cilium" {
   }
 
   depends_on = [
-    helm_release.cilium_ingress_nginx,
-    kubernetes_manifest.letsencrypt_cilium
+    helm_release.ingress_nginx,
+    kubernetes_manifest.letsencrypt
   ]
 }

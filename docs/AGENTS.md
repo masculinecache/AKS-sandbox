@@ -8,9 +8,7 @@ terraform/
 ├── variables.tf         # All input variables with defaults
 ├── terraform.tfvars.example  # Template (copy to terraform.tfvars, never commit)
 ├── aks.tf               # AKS cluster + spot node pool
-├── helm.tf              # All Helm releases (cert-manager, nginx, Cilium, echo-server, kubeview)
-charts/
-└── kubeview/            # Local copy of kubeview chart (no published Helm repo)
+├── helm.tf              # All Helm releases (cert-manager, ingress-nginx, echo-server)
 └── k8s-manifests.tf     # ClusterIssuers, Ingresses, provider configs for helm/kubernetes
 docs/
 ├── ARCHITECTURE.md      # System design, topology, debugging chronicle
@@ -23,7 +21,7 @@ README.md                # Project overview, deployment instructions
 ### Terraform
 
 - **One resource per conceptual concern** — AKS cluster in `aks.tf`, Helm charts in `helm.tf`, K8s manifests in `k8s-manifests.tf`
-- **Helm values are inlined** via `values = [yamlencode(local.*)]` for Cilium (large config), or individual `set {}` blocks for simple values
+- **Helm values use `set = []` blocks** — all values are simple key-value pairs; no `values` / `yamlencode` blocks
 - **Dependency chains are explicit** via `depends_on` in deploy order (cert-manager → ingress → apps → TLS)
 - **Sensitive variables** (`subscription_id`) pass through `variables.tf` with `sensitive = true`, never hardcoded
 - **State**: local backend (`backend "local" {}`). No remote state store configured.
@@ -40,7 +38,7 @@ README.md                # Project overview, deployment instructions
 ### Version pinning
 
 - Provider versions: `~> 4.0` (azurerm), `~> 3.0` (helm), `~> 2.0` (kubernetes)
-- Helm chart versions: `~> X.Y` (allow patch upgrades, pin major.minor)
+- Helm chart versions: pinned to exact versions (e.g. `"4.15.1"`, `"0.5.0"`)
 - Kubernetes version: set in `variables.tf` with default `"1.34.6"`
 
 ## Workflow
@@ -98,10 +96,12 @@ resource "helm_release" "my_app" {
   create_namespace = true
   version          = "~> 1.0"
 
-  set {
-    name  = "someValue"
-    value = "true"
-  }
+  set = [
+    {
+      name  = "someValue"
+      value = "true"
+    }
+  ]
 
   depends_on = [
     helm_release.some_prerequisite
@@ -122,11 +122,11 @@ resource "kubernetes_manifest" "ingress_my_app" {
       name      = "my-app"
       namespace = "my-app"
       annotations = {
-        "cert-manager.io/cluster-issuer" = "letsencrypt"  # or letsencrypt-cilium
+        "cert-manager.io/cluster-issuer" = "letsencrypt"
       }
     }
     spec = {
-      ingressClassName = "nginx"  # or cilium-nginx
+      ingressClassName = "nginx"
       rules = [{
         host = "my-app.centralus.cloudapp.azure.com"
         http = {
@@ -150,27 +150,17 @@ resource "kubernetes_manifest" "ingress_my_app" {
   }
 
   depends_on = [
-    helm_release.ingress_nginx,           # for class: nginx
-    # or helm_release.cilium_ingress_nginx  # for class: cilium-nginx
-    kubernetes_manifest.letsencrypt,      # for class: nginx
-    # or kubernetes_manifest.letsencrypt_cilium  # for class: cilium-nginx
+    helm_release.ingress_nginx,
+    kubernetes_manifest.letsencrypt
   ]
 }
 ```
 
 ## Gotchas
 
-### Cilium
-
-- **`bpf.masquerade: false` is required** — setting `true` breaks all pod-to-service connectivity when chaining with Azure CNI
-- **hostNetwork convergence is flaky** — after initial deploy or config change, the Envoy listener may stay on `127.0.0.1:12256`. Verify with `kubectl exec -n cilium ds/cilium -- ss -tlnp | grep envoy`. If stuck, restart the daemonset 2-3 times.
-- **`sharedListenerPort: 80` is ignored** — in `generic-veth` chaining mode, the Cilium operator always creates CiliumEnvoyConfig with port 8080 regardless of this setting. Known Cilium 1.19.x behavior.
-- **A new Azure LB may allocate a different public IP** — after destroying and recreating Cilium's LoadBalancer service, the DNS label must be updated on the new PIP.
-
 ### Azure
 
-- **DSR/Floating IP cannot be disabled** — Azure AKS enforces this. Any annotation or CLI change to disable it gets reverted by the cloud-controller-manager within ~30 seconds.
-- **DNS labels are global per region** — `phillias-cilium.centralus.cloudapp.azure.com` can only point to one PIP at a time. Moving the label requires removing it from the old PIP first.
+- **DNS labels are global per region** — `echo-cilium.centralus.cloudapp.azure.com` can only point to one PIP at a time. Moving the label requires removing it from the old PIP first.
 - **ACME HTTP-01 challenges need the correct ingress class** — cert-manager creates solver ingresses. If the ClusterIssuer's `class` field doesn't match a running controller, the challenge hangs. Clean stale `CertificateRequest` + `Order` resources before retrying.
 
 ### State & drift
@@ -181,7 +171,7 @@ resource "kubernetes_manifest" "ingress_my_app" {
 
 ### TLS
 
-- **cert-manager CertificateRequest may get stuck** if a prior HTTP-01 challenge failed with a different ingress controller class. Fix: delete the stale `CertificateRequest` and `Order` resources in the target namespace.
+- **cert-manager CertificateRequest may get stuck** if a prior HTTP-01 challenge failed. Fix: delete the stale `CertificateRequest` and `Order` resources in the target namespace.
 - **Let's Encrypt has rate limits** — 50 certificates per domain per week. During debugging, avoid repeated ingress creation/deletion cycles that trigger re-issuance.
 
 ## Verifying changes
@@ -200,8 +190,8 @@ helm list -A
 kubectl get certificate -A
 
 # Endpoint reachability
-curl -s -o /dev/null -w "%{http_code}" https://phillias-nginx.centralus.cloudapp.azure.com
-curl -s -o /dev/null -w "%{http_code}" https://phillias-cilium.centralus.cloudapp.azure.com
+curl -s -o /dev/null -w "%{http_code}" https://echo-nginx.centralus.cloudapp.azure.com
+curl -s -o /dev/null -w "%{http_code}" https://echo-cilium.centralus.cloudapp.azure.com
 ```
 
 Expected output: both endpoints return `200`.
