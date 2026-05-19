@@ -161,6 +161,37 @@ The sandbox targets `allsynx-dev-test` as a structural mirror. The table below e
 3. Delete the `ingress_echo_cilium` Ingress and `letsencrypt-cilium` ClusterIssuer resources
 4. Accept the domain as-is — it does not affect networking behavior
 
+## Cilium on vanilla Azure CNI — challenges and feasibility
+
+Installing Cilium on a standard AKS cluster (no `network_data_plane = "cilium"`) introduces significant friction. This section documents why pure Azure CNI is preferred for the target cluster and what barriers exist to adding Cilium later.
+
+### No overlay context
+
+The target uses pure Azure CNI flat VNet — pods receive real Azure VNet IPs from the subnet, no overlay, no tunneling. This simplifies pod-to-pod routing (handled by Azure's VNet directly) but has implications for Cilium:
+
+- The standard Cilium migration guide (docs.cilium.io "k8s-install-migration") assumes you can cleanly remove kube-proxy. On AKS the addon manager regenerates the DaemonSet — you can scale it to 0, but this is unsupported and fights the platform.
+- Azure CNI chaining (`generic-veth` + `chainingTarget: azure-vnet`) is a non-standard configuration path the basic migration guide doesn't cover. The chaining-specific settings (`bpf.masquerade=false`, `endpointRoutes.enabled=true`, etc.) must be derived from experimentation.
+
+### Seven friction points
+
+| # | Issue | Root cause | Severity |
+|---|---|---|---|
+| 1 | **kube-proxy conflict** | AKS never labels nodes with `kubernetes.azure.com/ebpf-dataplane=cilium` on vanilla clusters. kube-proxy keeps running on every node. `kubeProxyReplacement=true` causes two dataplanes managing the same iptables rules — race conditions, dropped connections, reconciliation loops. `kubeProxyReplacement=probe` degrades to hybrid mode, losing eBPF benefits. | 🔴 Critical |
+| 2 | **Azure LB DSR kills Cilium ingress** | SYN packets arrive with the LB frontend IP as destination. eBPF TPROXY can't redirect a non-local destination IP. The SYN never reaches Envoy — client times out. Workaround requires a second nginx-based controller (`cilium-ingress-nginx`), negating the "one LB" simplicity. | 🔴 Critical |
+| 3 | **`bpf.masquerade` must be false** | Non-negotiable in chaining mode — `true` breaks all pod-to-service connectivity. Cilium falls back to iptables-based masquerading, defeating part of the eBPF value proposition. | 🟡 Significant |
+| 4 | **hostNetwork convergence flaky** | Envoy often lands on `127.0.0.1:12256` instead of `0.0.0.0:8080` after install or config change. Requires 2-3 manual daemonset restarts — no operator logic handles this. | 🟡 Significant |
+| 5 | **Resource pressure on small SKUs** | Cilium agent + Envoy consume ~500-800 MB RAM per node. Manageable on D2as_v4/D4ds_v5 but prohibitive on B-series (B2s). | 🟡 Moderate |
+| 6 | **Network policy surprises** | Cilium enables policy enforcement by default. Target has `networkPolicy: none` at the AKS level — policies can silently break existing traffic (~40 ingresses) without explicit allow rules. Requires `policyEnforcementMode=default` with permissive defaults. | 🟡 Moderate |
+| 7 | **Upgrade coupling** | AKS node image upgrades can ship newer `azure-cns` that changes IPAM or veth behavior, breaking Cilium's chaining config. Cilium, Azure CNI, and Kubernetes versions must all align — no independent upgrades. | 🟢 Minor |
+
+### `bpf.hostLegacyRouting: true` — not applicable
+
+This setting controls host-namespace to pod-namespace routing (iptables vs TC eBPF at the host level). The DSR/TPROXY problem (#2 above) is at a different layer — the Azure LB delivers SYNs with a non-local destination IP before the host-to-pod routing decision is even relevant. Whether Cilium uses iptables or eBPF to route from host to pod doesn't change the fact that the initial SYN never reaches Envoy. The hybrid approach (ingress-nginx for external traffic, Cilium KPR for internal service routing) already works correctly and `bpf.hostLegacyRouting` doesn't simplify it.
+
+### Recommendation
+
+The only clean path for Cilium on AKS is Azure CNI powered by Cilium (`network_data_plane = "cilium"`), where AKS handles the integration end-to-end, properly labels nodes to evict kube-proxy, and manages upgrades. For the existing target, pure Azure CNI avoids all seven issues. A new cluster with `network_data_plane = "cilium"` should be evaluated separately if eBPF dataplane benefits are needed.
+
 ## Deployment order (dependency chain)
 
 ```
