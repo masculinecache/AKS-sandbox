@@ -177,7 +177,7 @@ The target uses pure Azure CNI flat VNet — pods receive real Azure VNet IPs fr
 | # | Issue | Root cause | Severity |
 |---|---|---|---|
 | 1 | **kube-proxy conflict** | AKS never labels nodes with `kubernetes.azure.com/ebpf-dataplane=cilium` on vanilla clusters. kube-proxy keeps running on every node. `kubeProxyReplacement=true` causes two dataplanes managing the same iptables rules — race conditions, dropped connections, reconciliation loops. `kubeProxyReplacement=probe` degrades to hybrid mode, losing eBPF benefits. | 🔴 Critical |
-| 2 | **Azure LB DSR kills Cilium ingress** | SYN packets arrive with the LB frontend IP as destination. eBPF TPROXY can't redirect a non-local destination IP. The SYN never reaches Envoy — client times out. Workaround requires a second nginx-based controller (`cilium-ingress-nginx`), negating the "one LB" simplicity. | 🔴 Critical |
+| 2 | **Cilium ingress controller not serving external traffic** | External requests to the Cilium ingress controller LB timed out; internal traffic worked. Root cause undiagnosed — no packet capture taken. Leading theory (untested): DSR/TPROXY incompatibility where SYN arrives with non-local destination IP and TPROXY cannot redirect. Alternative theories include Envoy convergence failure, health probe rejection, port collision. Workaround: second nginx-based controller (`cilium-ingress-nginx`). | 🔴 Critical |
 | 3 | **`bpf.masquerade` must be false** | Non-negotiable in chaining mode — `true` breaks all pod-to-service connectivity. Cilium falls back to iptables-based masquerading, defeating part of the eBPF value proposition. | 🟡 Significant |
 | 4 | **hostNetwork convergence flaky** | Envoy often lands on `127.0.0.1:12256` instead of `0.0.0.0:8080` after install or config change. Requires 2-3 manual daemonset restarts — no operator logic handles this. | 🟡 Significant |
 | 5 | **Resource pressure on small SKUs** | Cilium agent + Envoy consume ~500-800 MB RAM per node. Manageable on D2as_v4/D4ds_v5 but prohibitive on B-series (B2s). | 🟡 Moderate |
@@ -186,7 +186,7 @@ The target uses pure Azure CNI flat VNet — pods receive real Azure VNet IPs fr
 
 ### `bpf.hostLegacyRouting: true` — not applicable
 
-This setting controls host-namespace to pod-namespace routing (iptables vs TC eBPF at the host level). The DSR/TPROXY problem (#2 above) is at a different layer — the Azure LB delivers SYNs with a non-local destination IP before the host-to-pod routing decision is even relevant. Whether Cilium uses iptables or eBPF to route from host to pod doesn't change the fact that the initial SYN never reaches Envoy. The hybrid approach (ingress-nginx for external traffic, Cilium KPR for internal service routing) already works correctly and `bpf.hostLegacyRouting` doesn't simplify it.
+This setting controls host-namespace to pod-namespace routing (iptables vs TC eBPF at the host level). The Cilium ingress controller failure (#2 above) is at a different layer — the external traffic never reaches Envoy regardless of how host-to-pod routing works. Whether Cilium uses iptables or eBPF for the host-to-pod hop doesn't matter if the initial SYN never arrives at Envoy. The hybrid approach (ingress-nginx for external traffic, Cilium KPR for internal service routing) already works correctly and `bpf.hostLegacyRouting` doesn't simplify it. If the root cause turns out to be something other than DSR/TPROXY (e.g., Envoy convergence failure), this conclusion should be revisited.
 
 ### Recommendation
 
@@ -214,19 +214,30 @@ Apply with `terraform apply`. ClusterIssuers and Ingresses are created as `kuber
 
 ### Why two ingress controllers instead of one?
 
-**Short answer**: Cilium's built-in ingress (eBPF TPROXY + Envoy) cannot handle Azure's mandatory DSR/Floating IP mode on AKS with Azure CNI. Nginx-based controllers can.
+**Short answer**: The Cilium-built-in ingress controller (Envoy via Cilium Ingress Controller) did not serve external traffic when tested. The root cause remains **undiagnosed** — see below for theories and untested hypotheses. A second nginx-based controller (`cilium-ingress-nginx`) was deployed as a working workaround.
 
-**Technical root cause**:
+**Observed behavior**: External HTTP/HTTPS requests to the Cilium ingress controller's LoadBalancer IP timed out. Internal cluster traffic (pods reaching the Envoy service ClusterIP) worked correctly. No tcpdump or packet capture was taken at the time.
+
+**Leading theory (untested) — DSR/TPROXY incompatibility**:
 - Azure LB with DSR sends TCP SYNs to the node with the LB IP as destination (not a NodePort)
-- Cilium's eBPF TPROXY hook on `eth0` tries to redirect these packets to the local Envoy process
-- TPROXY with a non-local destination IP requires special kernel handling that does not work in this path
+- Cilium's eBPF TPROXY hook on `eth0` may fail to redirect these packets to the local Envoy process because TPROXY with a non-local destination IP requires special kernel handling
 - The SYN never reaches Envoy → no SYN-ACK → client times out
 
-**Why nginx works**:
-- nginx ingress uses standard service forwarding (kube-proxy / Cilium KPR)
-- Traffic goes: LB → NodePort → Cilium KPR → pod IP (via veth pair)
-- The pod IP is a *remote* address — Cilium forwards the packet through the pod's network interface
-- This forwarding path works correctly with DSR
+**Alternative theories (also untested)**:
+
+| Theory | What it would look like | How to test |
+|---|---|---|
+| CiliumEnvoyConfig never converged | Envoy stuck on `127.0.0.1:12256` instead of `0.0.0.0:8080` | `kubectl exec -n cilium ds/cilium -- ss -tlnp \| grep envoy` before and after restart |
+| Cilium ingress controller Service's `externalTrafficPolicy` defaulted to Cluster, and DSR + Cluster mode together confused reply routing | SYN reaches Envoy, SYN-ACK is sent but source IP is wrong, client never receives it | Set `externalTrafficPolicy: Local` on the Cilium ingress controller's LoadBalancer service |
+| Azure LB health probe never passed → backends marked unhealthy → LB drops traffic | LB probe requests to the health check endpoint return non-200 | Check LB backend health in Azure portal; verify the Cilium ingress controller's `/healthz` endpoint works |
+| Cilium agent not running the ingress controller at all (misconfiguration or Helm values not applied) | No Envoy listener on any port | `kubectl exec -n cilium ds/cilium -- cilium status` to verify ingress controller is enabled and running |
+| hostNetwork collision on port 80/443 with another process on the node (e.g., kube-proxy's health check server) | Port conflict logged in Cilium agent logs | Check `kubectl logs -n cilium ds/cilium` for EADDRINUSE |
+
+**Why nginx works regardless of the root cause**:
+- nginx ingress is deployed as a standard Kubernetes Service of type LoadBalancer
+- Azure LB forwards traffic to NodePorts on the nodes
+- kube-proxy (or Cilium KPR) routes from NodePort to the nginx pod
+- This path does not depend on eBPF TPROXY, hostNetwork, or any Cilium-specific ingress mechanism — it works the same way any LoadBalancer Service works on AKS
 
 **Why not just use one nginx for both domains?**: User requirement: ingress-nginx must remain the default and untouched. A second controller provides clean isolation.
 
@@ -258,7 +269,7 @@ These were tried and conclusively proven ineffective:
 | Manual LB backend pool / probe edits | Overwritten by cloud-controller-manager |
 | `externalTrafficPolicy: Local` | Still uses DSR, no change in behavior |
 | `bpf.masquerade: true` with `ipv4NativeRoutingCIDR` | Broke all pod-to-service connectivity |
-| Cilium Ingress Controller with hostNetwork + separate LB service | Internal routing works, external SYN still times out (DSR applies at LB → node level) |
+| Cilium Ingress Controller with hostNetwork + separate LB service | External traffic timed out, internal traffic worked. Root cause not captured — no tcpdump taken. DSR/TPROXY leading theory only. |
 
 ## Deployment from scratch
 
