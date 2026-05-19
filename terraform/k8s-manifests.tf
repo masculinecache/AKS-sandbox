@@ -6,34 +6,12 @@ provider "kubernetes" {
 }
 
 provider "helm" {
-  kubernetes {
+  kubernetes = {
     host                   = azurerm_kubernetes_cluster.main.kube_config.0.host
     client_certificate     = base64decode(azurerm_kubernetes_cluster.main.kube_config.0.client_certificate)
     client_key             = base64decode(azurerm_kubernetes_cluster.main.kube_config.0.client_key)
     cluster_ca_certificate = base64decode(azurerm_kubernetes_cluster.main.kube_config.0.cluster_ca_certificate)
   }
-}
-
-resource "kubernetes_namespace" "echo_server_nginx" {
-  metadata {
-    name = "echo-server-nginx"
-    labels = {
-      "app.kubernetes.io/managed-by" = "terraform"
-    }
-  }
-
-  depends_on = [helm_release.echo_server_nginx]
-}
-
-resource "kubernetes_namespace" "echo_server_cilium" {
-  metadata {
-    name = "echo-server-cilium"
-    labels = {
-      "app.kubernetes.io/managed-by" = "terraform"
-    }
-  }
-
-  depends_on = [helm_release.echo_server_cilium]
 }
 
 # ── ClusterIssuers ────────────────────────────────────────────────────────────

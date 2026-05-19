@@ -29,8 +29,7 @@ resource "azurerm_kubernetes_cluster" "main" {
   }
 
   network_profile {
-    network_plugin    = "azure"
-    network_policy    = "none"
+    network_plugin      = "azure"
     load_balancer_sku = "standard"
     service_cidr      = "10.0.0.0/16"
     dns_service_ip    = "10.0.0.10"
@@ -59,8 +58,8 @@ resource "azurerm_kubernetes_cluster_node_pool" "spot" {
   node_count            = 1
   min_count             = var.spot_node_min_count
   max_count             = var.spot_node_max_count
-  enable_auto_scaling   = true
   os_disk_size_gb       = 128
+  auto_scaling_enabled  = true
   priority              = "Spot"
   eviction_policy       = "Delete"
   spot_max_price        = -1 # <= hourly price of standard
