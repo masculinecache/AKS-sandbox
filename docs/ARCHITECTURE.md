@@ -137,6 +137,30 @@ ingressController:
 
 Both ClusterIssuers (`terraform/k8s-manifests.tf`) use HTTP-01 challenge with Let's Encrypt production endpoint. cert-manager creates solver ingresses automatically.
 
+## Target cluster equivalence
+
+The sandbox targets `allsynx-dev-test` as a structural mirror. The table below evaluates networking equivalence — anything not listed is either identical (service CIDR, DNS IP, LB SKU, outbound type, kube-proxy iptables mode, HostPort usage, network policies) or non-structural (ingress count, app domains).
+
+| Aspect | Target (allsynx-dev-test) | Sandbox | Status |
+|---|---|---|---|
+| CNI | Pure Azure CNI, no overlay, no pluginMode | Pure Azure CNI, no overlay, no pluginMode | ✅ Match |
+| Pod CIDR | 10.1.0.0/18 (explicit) | Auto-assigned (not set in config) | ⚠️ Should be set explicitly |
+| kube-proxy Cilium affinity | `kubernetes.azure.com/ebpf-dataplane NotIn [cilium]` (inert — no labeled nodes) | AKS default (same template) | ✅ Inert on both |
+| Cilium deployed | No | Yes (in config, PR #8 strips it) | ⚠️ Pending merge |
+| Ingress controller | ingress-nginx, class nginx, 1 LB | ingress-nginx + cilium-ingress-nginx, 2 LBs | ⚠️ Strip second controller |
+| Domain | `*.thebenefitshub.com` | `*.centralus.cloudapp.azure.com` | 🚫 Cannot serve target domain — sandbox uses own DNS suffix |
+
+### Blocker
+
+**Domain** is the only genuine networking blocker. You cannot terminate TLS or route traffic for `*.thebenefitshub.com` without owning that zone. The sandbox works around this by using its own `centralus.cloudapp.azure.com` suffix — all structural networking properties (CNI mode, CIDRs, kube-proxy, LB, no HostPort, no network policies) are already equivalent or one config change away.
+
+### Required changes for networking equivalence
+
+1. Set `pod_cidr = "10.1.0.0/18"` in `aks.tf` `network_profile`
+2. Merge PR #8 to strip Cilium, cilium-ingress-nginx, echo-server-cilium, kubeview, and the `letsencrypt-cilium` ClusterIssuer
+3. Delete the `ingress_echo_cilium` Ingress and `letsencrypt-cilium` ClusterIssuer resources
+4. Accept the domain as-is — it does not affect networking behavior
+
 ## Deployment order (dependency chain)
 
 ```
