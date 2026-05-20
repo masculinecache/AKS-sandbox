@@ -93,7 +93,7 @@ kubectl get ciliumendpoint -n cert-manager
 | `enable-masquerade-to-route-source=true` fixes cross-node Envoy→backend connectivity | Without this, cilium-envoy's `reserved:ingress` identity egress connections to pods on other nodes time out (`cx_connect_fail`). The setting causes outbound traffic from Envoy to be masqueraded to the local route source IP, allowing return traffic to be properly routed. Note: incompatible with `bpf.masquerade=true`. |
 | **cert-manager needs CiliumEndpoint** (NEW) | Pods without CiliumEndpoints cannot reach services through Cilium's L7 LB. cert-manager's ACME self-check fails with `connection refused` until restarted after Cilium install. |
 | **Azure DNS labels are single-PIP** (NEW) | Each Azure public IP supports exactly one DNS label. Reassigning requires removing from old PIP first: `--set dnsSettings=null`. |
-| **Cilium ingress TLS chicken-and-egg** (NEW) | A Cilium Ingress with `tls:` blocks ACME HTTP-01 challenges because Envoy redirects HTTP→HTTPS before the certificate exists. Issue certificate first (via nginx ingress or temporarily remove TLS), then add TLS config. |
+| **Cilium ingress TLS chicken-and-egg** | A Cilium Ingress with `tls:` blocks ACME HTTP-01 challenges because Envoy redirects HTTP→HTTPS before the certificate exists. **Fix**: Add `acme.cert-manager.io/http01-edit-in-place: "true"` annotation — cert-manager issues a temporary self-signed cert first, allowing the redirect to work, then replaces it with the real cert. |
 
 ---
 
@@ -164,19 +164,31 @@ kubectl get ciliumendpoint -n cert-manager
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    Phase 4: Issue certificates                      │
+│                    Phase 4: Create Cilium Ingress with annotation   │
 │                                                                     │
-│  Option A (recommended):                                            │
-│    1. Issue certificate via ingress-nginx (class: nginx)            │
-│    2. Verify: kubectl get certificate -A → Ready=True               │
+│  Add the acme.cert-manager.io/http01-edit-in-place annotation:      │
 │                                                                     │
-│  Option B (Cilium direct):                                          │
-│    1. Create Cilium Ingress WITHOUT tls: block                      │
-│    2. Wait for certificate issuance                                 │
-│    3. Patch Ingress to add tls: block                               │
+│  apiVersion: networking.k8s.io/v1                                   │
+│  kind: Ingress                                                      │
+│  metadata:                                                          │
+│    annotations:                                                     │
+│      cert-manager.io/cluster-issuer: "letsencrypt"                  │
+│      acme.cert-manager.io/http01-edit-in-place: "true"  # ← KEY    │
+│  spec:                                                              │
+│    ingressClassName: cilium                                         │
+│    tls:                                                             │
+│    - hosts: [echo-cilium.centralus.cloudapp.azure.com]              │
+│      secretName: echo-cilium-tls                                    │
+│    # ... rest of spec                                               │
 │                                                                     │
-│  ⚠️ Do NOT create Cilium Ingress with tls: before cert exists      │
-│     → Envoy redirects HTTP→HTTPS → ACME challenge fails             │
+│  How it works:                                                      │
+│  1. cert-manager auto-adds "issue-temporary-certificate: true"     │
+│  2. Self-signed temp cert placed in Secret                          │
+│  3. Cilium Envoy can serve HTTPS with temp cert                     │
+│  4. ACME challenge self-check follows HTTP→HTTPS redirect           │
+│  5. Real Let's Encrypt cert replaces temp cert                      │
+│                                                                     │
+│  No DNS reassignment needed — Cilium handles the full flow.         │
 └─────────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
@@ -380,7 +392,7 @@ helm upgrade cilium cilium/cilium --version 1.19.4 \
 | Auto-chaining fails always | Cilium's `findExistingCNIConfig` can't match the Azure CNI `plugins[]` format, and `generic-veth` requires `customConf=true` per docs |
 | `endpointRoutes.enabled=true` not required | Azure CNI VNet IPs are directly routable; per-endpoint routes redundant. Tested `InstallEndpointRoute: false`. |
 | cert-manager ACME self-check: `connection refused` | cert-manager deployed before Cilium → no CiliumEndpoint → traffic dropped by BPF. **Fix**: restart cert-manager after Cilium install. |
-| Cilium Ingress with TLS blocks ACME challenges | Envoy redirects HTTP→HTTPS before certificate exists. **Fix**: issue cert first, then add TLS config. |
+| Cilium Ingress with TLS blocks ACME challenges | Envoy redirects HTTP→HTTPS before certificate exists. **Fix**: Add `acme.cert-manager.io/http01-edit-in-place: "true"` on the Ingress. This auto-propagates to `cert-manager.io/issue-temporary-certificate: "true"` on the Certificate, creating a temp self-signed cert that allows the redirect to work. |
 | Azure DNS label conflict | One DNS label per public IP. **Fix**: remove from old PIP before adding to new PIP. |
 
 ---
