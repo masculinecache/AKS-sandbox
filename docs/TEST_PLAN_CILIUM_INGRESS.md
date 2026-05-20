@@ -6,13 +6,36 @@ Determine why the Cilium-built-in ingress controller (Envoy via CEC) does not se
 
 ## Outcome
 
-The Cilium ingress controller **works** on vanilla AKS with the right configuration. The failure was not caused by DSR/TPROXY or fundamental architecture incompatibility.
+The Cilium ingress controller **works** on vanilla AKS with the right configuration. Verified end-to-end: external client → Azure LB → Envoy → echo-server pod.
 
 ### Working configuration
 
+The ConfigMap must be created **before** installing Cilium, with the key `cni-config` in the `cilium` namespace:
+
 ```bash
+kubectl create namespace cilium
+
+kubectl create configmap -n cilium cni-configuration --from-literal=cni-config='{
+  "cniVersion": "0.3.0",
+  "name": "azure",
+  "plugins": [
+    { "type": "azure-vnet", "mode": "transparent",
+      "ipsToRouteViaHost": ["169.254.20.10"],
+      "ipam": { "type": "azure-vnet-ipam" } },
+    { "type": "cilium-cni", "chaining-mode": "generic-veth" },
+    { "type": "portmap",
+      "capabilities": { "portMappings": true }, "snat": true }
+  ]
+}'
+```
+
+Then install Cilium:
+
+```bash
+helm repo add cilium https://helm.cilium.io/
+
 helm install cilium cilium/cilium --version 1.19.4 \
-  --namespace cilium --create-namespace \
+  --namespace cilium \
   --set kubeProxyReplacement=true \
   --set routingMode=native \
   --set ipv4NativeRoutingCIDR=10.224.0.0/12 \
@@ -27,22 +50,7 @@ helm install cilium cilium/cilium --version 1.19.4 \
   --set nodeinit.enabled=true
 ```
 
-Plus a `cni-configuration` ConfigMap:
-
-```json
-{
-  "cniVersion": "0.3.0",
-  "name": "azure",
-  "plugins": [
-    { "type": "azure-vnet", "mode": "transparent",
-      "ipsToRouteViaHost": ["169.254.20.10"],
-      "ipam": { "type": "azure-vnet-ipam" } },
-    { "type": "cilium-cni", "chaining-mode": "generic-veth" },
-    { "type": "portmap",
-      "capabilities": { "portMappings": true }, "snat": true }
-  ]
-}
-```
+⚠️ **Note**: After install, wait ~30s for EDS to sync before testing. Early requests may return `503 Service Unavailable — upstream connect error`.
 
 ### Key findings
 
@@ -55,6 +63,9 @@ Plus a `cni-configuration` ConfigMap:
 | Auto-chaining is not supported for `generic-veth` | Cilium docs confirm `generic-veth` requires `customConf=true`. The `findExistingCNIConfig` function cannot parse the Azure CNI `plugins[]` format. |
 | EDS sync delay after restart | Envoy's EDS cluster takes ~20-30s to reflect backend endpoints after Cilium agent restart + pod recreation |
 | `endpointRoutes.enabled` is **not needed** | Azure CNI assigns directly-routable VNet IPs; per-endpoint routes are redundant. Confirmed with `InstallEndpointRoute: false` — `rq_success::1`. |
+| ConfigMap key must be `cni-config` | The Cilium agent mounts the ConfigMap at `/tmp/cni-configuration/` and expects a file named `cni-config`. Using `--from-literal=config=...` fails silently. |
+| ConfigMap must be in `cilium` namespace | Helm sets `cni.configMap=cni-configuration`, but the Cilium agent looks for it in its own namespace (`cilium`), not `kube-system`. |
+| `kubeProxyReplacement=true` is required | The initial Cilium install with `kubeProxyReplacement=true` removes AKS's kube-proxy DaemonSet. Switching to `false` later leaves no kube-proxy replacement, breaking NodePort/LB forwarding. |
 
 ## Prerequisites
 
