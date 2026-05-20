@@ -99,6 +99,7 @@ resource "kubernetes_manifest" "ingress_echo_nginx" {
 
   depends_on = [
     helm_release.ingress_nginx,
+    helm_release.echo_nginx,
     kubernetes_manifest.letsencrypt
   ]
 }
@@ -148,6 +149,7 @@ resource "kubernetes_manifest" "ingress_echo_cilium" {
 
   depends_on = [
     helm_release.ingress_nginx,
+    helm_release.echo_cilium,
     kubernetes_manifest.letsencrypt
   ]
 }
@@ -208,6 +210,7 @@ resource "kubernetes_manifest" "ingress_echo_cilium_cilium" {
 
   depends_on = [
     helm_release.ingress_nginx,
+    helm_release.echo_cilium,
     kubernetes_manifest.letsencrypt
   ]
 }
