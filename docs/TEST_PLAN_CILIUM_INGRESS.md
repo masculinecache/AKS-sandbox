@@ -44,6 +44,7 @@ helm install cilium cilium/cilium --version 1.19.4 \
   --set cni.customConf=true \
   --set cni.configMap=cni-configuration \
   --set bpf.masquerade=false \
+  --set enable-masquerade-to-route-source=true \
   --set ingressController.enabled=true \
   --set ingressController.hostNetwork.enabled=false \
   --set ingressController.loadbalancerMode=shared \
@@ -66,6 +67,7 @@ helm install cilium cilium/cilium --version 1.19.4 \
 | ConfigMap key must be `cni-config` | The Cilium agent mounts the ConfigMap at `/tmp/cni-configuration/` and expects a file named `cni-config`. Using `--from-literal=config=...` fails silently. |
 | ConfigMap must be in `cilium` namespace | Helm sets `cni.configMap=cni-configuration`, but the Cilium agent looks for it in its own namespace (`cilium`), not `kube-system`. |
 | `kubeProxyReplacement=true` is required | The initial Cilium install with `kubeProxyReplacement=true` removes AKS's kube-proxy DaemonSet. Switching to `false` later leaves no kube-proxy replacement, breaking NodePort/LB forwarding. |
+| `enable-masquerade-to-route-source=true` fixes cross-node Envoy→backend connectivity | Without this, cilium-envoy's `reserved:ingress` identity egress connections to pods on other nodes time out (`cx_connect_fail`). The setting causes outbound traffic from Envoy to be masqueraded to the local route source IP, allowing return traffic to be properly routed. Note: incompatible with `bpf.masquerade=true`. |
 
 ## Prerequisites
 

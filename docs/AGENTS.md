@@ -209,8 +209,22 @@ The `time_sleep` resource is the key fix for the cert-manager CRD race condition
 
 ### Azure
 
-- **DNS labels are global per region** — `echo-cilium.centralus.cloudapp.azure.com` can only point to one PIP at a time. Moving the label requires removing it from the old PIP first.
+- **DNS labels are global per region** — `echo-cilium.centralus.cloudapp.azure.com` can only point to one PIP at a time. Moving the label requires removing it from the old PIP first:
+  ```bash
+  az network public-ip update -g <rg> -n <old-pip> --set dnsSettings=null
+  az network public-ip update -g <rg> -n <new-pip> --dns-name "<label>"
+  ```
 - **ACME HTTP-01 challenges need the correct ingress class** — cert-manager creates solver ingresses. If the ClusterIssuer's `class` field doesn't match a running controller, the challenge hangs. Clean stale `CertificateRequest` + `Order` resources before retrying.
+
+### cert-manager
+
+- **`force_conflicts = true` required on ClusterIssuer** — cert-manager's status patches collide with Terraform's `kubernetes_manifest` field ownership without this. Add `field_manager { force_conflicts = true }` to the resource.
+- **Stale Orders cause "ACME client for issuer not initialised/available"** — after upgrade or downgrade, old Order resources in `valid` state may trigger repeating error loops. Delete them:
+  ```bash
+  kubectl delete order -n <namespace> <order-name>
+  ```
+  The Certificate and Secret remain intact.
+- **Helm downgrade in-place is blocked** — use `terraform taint helm_release.cert_manager` and re-apply, after deleting webhook configurations first to prevent destroy hang.
 
 ### State & drift
 

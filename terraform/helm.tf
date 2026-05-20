@@ -5,7 +5,7 @@ resource "helm_release" "cert_manager" {
   chart            = "cert-manager"
   namespace        = "cert-manager"
   create_namespace = true
-  version          = "1.16.5"
+  version          = "1.9.1"
 
   set = [
     {
