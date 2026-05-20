@@ -21,7 +21,6 @@ helm install cilium cilium/cilium --version 1.19.4 \
   --set cni.customConf=true \
   --set cni.configMap=cni-configuration \
   --set bpf.masquerade=false \
-  --set endpointRoutes.enabled=true \
   --set ingressController.enabled=true \
   --set ingressController.hostNetwork.enabled=false \
   --set ingressController.loadbalancerMode=shared \
@@ -55,6 +54,7 @@ Plus a `cni-configuration` ConfigMap:
 | `generic-veth` chaining creates CiliumEndpoints | With `generic-veth` + `customConf=true`, Cilium creates proper endpoints and EDS routing works |
 | Auto-chaining is not supported for `generic-veth` | Cilium docs confirm `generic-veth` requires `customConf=true`. The `findExistingCNIConfig` function cannot parse the Azure CNI `plugins[]` format. |
 | EDS sync delay after restart | Envoy's EDS cluster takes ~20-30s to reflect backend endpoints after Cilium agent restart + pod recreation |
+| `endpointRoutes.enabled` is **not needed** | Azure CNI assigns directly-routable VNet IPs; per-endpoint routes are redundant. Confirmed with `InstallEndpointRoute: false` — `rq_success::1`. |
 
 ## Prerequisites
 
@@ -171,3 +171,4 @@ helm upgrade cilium cilium/cilium --version 1.19.4 \
 | Envoy on `0.0.0.0:8080` (hostNetwork=false), no healthy upstream | `portmap` chaining: Cilium doesn't create CiliumEndpoints for Azure CNI pods, so EDS has zero backends |
 | Envoy on `0.0.0.0:8080`, healthy upstream | ✅ `generic-veth` chaining + `customConf=true` + custom ConfigMap — the working config |
 | Auto-chaining fails always | Cilium's `findExistingCNIConfig` can't match the Azure CNI `plugins[]` format, and `generic-veth` requires `customConf=true` per docs |
+| `endpointRoutes.enabled=true` not required | Azure CNI VNet IPs are directly routable; per-endpoint routes redundant. Tested `InstallEndpointRoute: false`. |
