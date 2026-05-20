@@ -102,58 +102,39 @@ Both use the same `letsencrypt` ClusterIssuer with HTTP-01 challenge. echo-ciliu
 
 ## Target cluster equivalence
 
-The sandbox targets `allsynx-dev-test` as a structural mirror. The table below evaluates networking equivalence — anything not listed is either identical (service CIDR, DNS IP, LB SKU, outbound type, kube-proxy iptables mode, HostPort usage, network policies) or non-structural (ingress count, app domains).
+The sandbox targets `allsynx-dev-test` as a structural mirror. The table below evaluates networking equivalence — anything not listed is either identical (service CIDR, DNS IP, LB SKU, outbound type, kube-proxy iptables mode, HostPort usage, network policies) or non-structural (ingress count).
 
 | Aspect | Target (allsynx-dev-test) | Sandbox | Status |
-|---|---|---|---|---|
+|---|---|---|---|---|---|
 | CNI | Pure Azure CNI, no overlay, no pluginMode | Pure Azure CNI, no overlay, no pluginMode | ✅ Match |
-| Pod CIDR | 10.1.0.0/18 (explicit) | Auto-assigned (not set in config) | ⚠️ Should be set explicitly |
 | kube-proxy Cilium affinity | `kubernetes.azure.com/ebpf-dataplane NotIn [cilium]` (inert — no labeled nodes) | AKS default (same template) | ✅ Inert on both |
 | Cilium deployed | No | Yes (CNI + ingress controller) | ⚠️ Not equivalent — kept for Cilium ingress testing |
 | Ingress controller | ingress-nginx, class nginx, 1 LB | ingress-nginx (class nginx) + Cilium ingress controller, 2 LBs | ⚠️ Dual controllers: nginx for shared routing, Cilium for `echo-cilium` DNS label |
-| Domain | `*.thebenefitshub.com` | `*.centralus.cloudapp.azure.com` | 🚫 Cannot serve target domain — sandbox uses own DNS suffix |
+| **DNS** | Custom DNS zone (`*.thebenefitshub.com`) | Azure DNS labels (`*.centralus.cloudapp.azure.com`) | 🚫 Different mechanism — Azure DNS labels are bound to public IPs |
+| **DNS management** | External DNS or manual A records | Azure DNS labels (`service.beta.kubernetes.io/azure-dns-label-name` or `az network public-ip update --dns-name`) | ⚠️ Sandbox uses Azure-native DNS labels; target uses custom zone |
+| **DNS label constraints** | N/A (custom zone) | One label per public IP per region | ⚠️ Azure DNS labels are globally unique per region; reassigning requires two-step removal+add |
 
-### Blocker
+### DNS behavior differences
 
-**Domain** is the only genuine networking blocker. You cannot terminate TLS or route traffic for `*.thebenefitshub.com` without owning that zone. The sandbox works around this by using its own `centralus.cloudapp.azure.com` suffix — all structural networking properties (CNI mode, CIDRs, kube-proxy, LB, no HostPort, no network policies) are already equivalent or one config change away.
+**Target (allsynx-dev-test)**: Uses a custom DNS zone (`*.thebenefitshub.com`) with A/CNAME records pointing to the ingress-nginx LB IP. Multiple domains can point to the same IP. CNAME records can alias to other domains.
+
+**Sandbox**: Uses Azure DNS labels (`*.centralus.cloudapp.azure.com`) which are properties of Azure public IP resources. Each public IP can have exactly one DNS label. Multiple labels require multiple public IPs (and multiple LBs). Reassigning a label from one PIP to another is a two-step process:
+
+```bash
+# Remove from old PIP
+az network public-ip update -g <rg> -n <old-pip> --set dnsSettings=null
+
+# Add to new PIP
+az network public-ip update -g <rg> -n <new-pip> --dns-name "<label>"
+```
+
+This constraint is why echo-cilium has its own Cilium LB — the DNS label is bound to that PIP. To consolidate to a single ingress controller, the label must be reassigned to the ingress-nginx PIP.
 
 ### Required changes for networking equivalence
 
-1. Set `pod_cidr = "10.1.0.0/18"` in `aks.tf` `network_profile`
-2. Strip Cilium and its ingress controller, leaving only ingress-nginx (class nginx, 1 LB)
-3. Reassign the `echo-cilium` Azure DNS label from the Cilium LB public IP to the ingress-nginx LB public IP
-4. Accept the domain as-is — it does not affect networking behavior
-
-## Cilium on vanilla Azure CNI — challenges and feasibility
-
-Installing Cilium on a standard AKS cluster (no `network_data_plane = "cilium"`) introduces significant friction. This section documents why pure Azure CNI is preferred for the target cluster and what barriers exist to adding Cilium later.
-
-### No overlay context
-
-The target uses pure Azure CNI flat VNet — pods receive real Azure VNet IPs from the subnet, no overlay, no tunneling. This simplifies pod-to-pod routing (handled by Azure's VNet directly) but has implications for Cilium:
-
-- The standard Cilium migration guide (docs.cilium.io "k8s-install-migration") assumes you can cleanly remove kube-proxy. On AKS the addon manager regenerates the DaemonSet — you can scale it to 0, but this is unsupported and fights the platform.
-- Azure CNI chaining (`generic-veth` + `chainingTarget: azure-vnet`) is a non-standard configuration path the basic migration guide doesn't cover. The chaining-specific settings (`bpf.masquerade=false`, `endpointRoutes.enabled=true`, etc.) must be derived from experimentation.
-
-### Seven friction points
-
-| # | Issue | Root cause | Severity |
-|---|---|---|---|
-| 1 | **kube-proxy conflict** | AKS never labels nodes with `kubernetes.azure.com/ebpf-dataplane=cilium` on vanilla clusters. kube-proxy keeps running on every node. `kubeProxyReplacement=true` causes two dataplanes managing the same iptables rules — race conditions, dropped connections, reconciliation loops. `kubeProxyReplacement=probe` degrades to hybrid mode, losing eBPF benefits. | 🔴 Critical |
-| 2 | **Cilium ingress controller not serving external traffic** | External requests to the Cilium ingress controller LB timed out; internal traffic worked. Root cause undiagnosed — no packet capture taken. Leading theory (untested): DSR/TPROXY incompatibility where SYN arrives with non-local destination IP and TPROXY cannot redirect. Alternative theories include Envoy convergence failure, health probe rejection, port collision. Workaround: second nginx-based controller (`cilium-ingress-nginx`). | 🔴 Critical |
-| 3 | **`bpf.masquerade` must be false** | Non-negotiable in chaining mode — `true` breaks all pod-to-service connectivity. Cilium falls back to iptables-based masquerading, defeating part of the eBPF value proposition. | 🟡 Significant |
-| 4 | **hostNetwork convergence flaky** | Envoy often lands on `127.0.0.1:12256` instead of `0.0.0.0:8080` after install or config change. Requires 2-3 manual daemonset restarts — no operator logic handles this. | 🟡 Significant |
-| 5 | **Resource pressure on small SKUs** | Cilium agent + Envoy consume ~500-800 MB RAM per node. Manageable on D2as_v4/D4ds_v5 but prohibitive on B-series (B2s). | 🟡 Moderate |
-| 6 | **Network policy surprises** | Cilium enables policy enforcement by default. Target has `networkPolicy: none` at the AKS level — policies can silently break existing traffic (~40 ingresses) without explicit allow rules. Requires `policyEnforcementMode=default` with permissive defaults. | 🟡 Moderate |
-| 7 | **Upgrade coupling** | AKS node image upgrades can ship newer `azure-cns` that changes IPAM or veth behavior, breaking Cilium's chaining config. Cilium, Azure CNI, and Kubernetes versions must all align — no independent upgrades. | 🟢 Minor |
-
-### `bpf.hostLegacyRouting: true` — not applicable
-
-This setting controls host-namespace to pod-namespace routing (iptables vs TC eBPF at the host level). The Cilium ingress controller failure (#2 above) is at a different layer — the external traffic never reaches Envoy regardless of how host-to-pod routing works. Whether Cilium uses iptables or eBPF for the host-to-pod hop doesn't matter if the initial SYN never arrives at Envoy. The hybrid approach (ingress-nginx for external traffic, Cilium KPR for internal service routing) already works correctly and `bpf.hostLegacyRouting` doesn't simplify it. If the root cause turns out to be something other than DSR/TPROXY (e.g., Envoy convergence failure), this conclusion should be revisited.
-
-### Recommendation
-
-The only clean path for Cilium on AKS is Azure CNI powered by Cilium (`network_data_plane = "cilium"`), where AKS handles the integration end-to-end, properly labels nodes to evict kube-proxy, and manages upgrades. For the existing target, pure Azure CNI avoids all seven issues. A new cluster with `network_data_plane = "cilium"` should be evaluated separately if eBPF dataplane benefits are needed.
+1. Strip Cilium and its ingress controller, leaving only ingress-nginx (class nginx, 1 LB)
+2. Reassign the `echo-cilium` Azure DNS label from the Cilium LB public IP to the ingress-nginx LB public IP
+3. Accept the DNS mechanism as-is — Azure DNS labels vs custom DNS zone does not affect networking behavior
 
 ## Deployment order (dependency chain)
 
@@ -214,32 +195,6 @@ The split also avoids a single SKU dependency — if v6 spot becomes scarce the 
 ### System node count (2 instead of 1)
 
 Azure CNI pre-allocates a block of IPs per node from the subnet. With a single system node and spot at 0 when idle, the cluster had no room to schedule system DaemonSets or pod replicas during rolling updates. Two nodes provide enough headroom for control-plane components to survive a node drain.
-
-## Cilium ingress on vanilla AKS — empirical findings
-
-The Cilium-built-in ingress controller **works** on vanilla AKS with `generic-veth` chaining + custom CNI config.
-
-### Working setup
-
-- `cni.chainingMode=generic-veth`, `cni.customConf=true`, `cni.configMap=cni-configuration`
-- ConfigMap chains: `azure-vnet → cilium-cni → portmap`
-- `ingressController.hostNetwork.enabled=false` (required — `hostNetwork=true` fails due to `NET_BIND_SERVICE` capability drop in `cilium-envoy-starter`)
-- `enable-masquerade-to-route-source=true` (required with `bpf.masquerade=false` — without this, cilium-envoy's `reserved:ingress` identity egress to pods on other nodes times out with `cx_connect_fail`)
-- `cni.exclusive` and `cni.chainingTarget` are irrelevant with `customConf=true`
-
-### Why auto-chaining fails
-
-Cilium's `findExistingCNIConfig()` cannot parse the Azure CNI `plugins[]` list format against the chaining target. The docs confirm `generic-veth` **requires** `customConf=true`.
-
-### Why portmap chaining fails
-
-With `cni.chainingMode=portmap`, Cilium does not create CiliumEndpoints for Azure CNI-managed pods. Envoy's EDS clusters have zero backends → "no healthy upstream".
-
-### Full request path (working)
-
-```
-Internet → Azure LB (20.221.114.240) → NodePort → Cilium Envoy → EDS → backend pod (10.224.0.x:8080)
-```
 
 ## Known issues & workarounds
 
@@ -345,6 +300,27 @@ az network public-ip update -g <rg> -n <new-pip> --dns-name "<label>"
 ```
 
 This is relevant when switching ingress controllers — the DNS label must follow the LB.
+
+## References
+
+### Documentation
+
+- [cert-manager ACME HTTP-01](https://cert-manager.io/docs/configuration/acme/http01/) — ACME challenge mechanism
+- [cert-manager Ingress Shim](https://cert-manager.io/docs/usage/ingress/) — Automatic certificate provisioning
+- [Azure CNI — IP address management](https://learn.microsoft.com/en-us/azure/aks/configure-azure-cni) — Azure CNI pod networking
+- [Azure DNS labels for LoadBalancer](https://learn.microsoft.com/en-us/azure/aks/static-ip#create-a-service-using-the-static-ip-address) — DNS label assignment via Service annotation
+- [Azure Public IP DNS settings](https://learn.microsoft.com/en-us/azure/virtual-network/ip-services/virtual-network-public-ip-address#dns-name-label) — DNS label management via CLI
+
+### Related documents in this repo
+
+- `docs/TEST_PLAN_CILIUM_INGRESS.md` — Detailed test plan for Cilium ingress controller on vanilla AKS, including the cert-manager CiliumEndpoint finding, migration flow diagram, and empirical test results
+- `docs/TARGETDEV.md` — Reference configuration for the target dev cluster (`allsynx-dev-test`)
+
+### Helm Charts
+
+- `https://charts.jetstack.io` — cert-manager Helm repository
+- `https://kubernetes.github.io/ingress-nginx` — ingress-nginx Helm repository
+- `https://ealenn.github.io/charts` — echo-server Helm repository
 
 ## Cleanup
 
