@@ -1,8 +1,60 @@
-# Test Plan: Cilium Ingress Controller on Vanilla AKS
+# Test Plan & Results: Cilium Ingress Controller on Vanilla AKS
 
 ## Objective
 
-Determine why the Cilium-built-in ingress controller (Envoy via CEC) does not serve external traffic on a standard AKS cluster with Azure CNI (no `network_data_plan = "cilium"`). Internal traffic to the service ClusterIP works; external traffic via LoadBalancer times out.
+Determine why the Cilium-built-in ingress controller (Envoy via CEC) does not serve external traffic on a standard AKS cluster with Azure CNI (no `network_data_plan = "cilium"`).
+
+## Outcome
+
+The Cilium ingress controller **works** on vanilla AKS with the right configuration. The failure was not caused by DSR/TPROXY or fundamental architecture incompatibility.
+
+### Working configuration
+
+```bash
+helm install cilium cilium/cilium --version 1.19.4 \
+  --namespace cilium --create-namespace \
+  --set kubeProxyReplacement=true \
+  --set routingMode=native \
+  --set ipv4NativeRoutingCIDR=10.224.0.0/12 \
+  --set ipam.mode=cluster-pool \
+  --set cni.chainingMode=generic-veth \
+  --set cni.customConf=true \
+  --set cni.configMap=cni-configuration \
+  --set bpf.masquerade=false \
+  --set endpointRoutes.enabled=true \
+  --set ingressController.enabled=true \
+  --set ingressController.hostNetwork.enabled=false \
+  --set ingressController.loadbalancerMode=shared \
+  --set nodeinit.enabled=true
+```
+
+Plus a `cni-configuration` ConfigMap:
+
+```json
+{
+  "cniVersion": "0.3.0",
+  "name": "azure",
+  "plugins": [
+    { "type": "azure-vnet", "mode": "transparent",
+      "ipsToRouteViaHost": ["169.254.20.10"],
+      "ipam": { "type": "azure-vnet-ipam" } },
+    { "type": "cilium-cni", "chaining-mode": "generic-veth" },
+    { "type": "portmap",
+      "capabilities": { "portMappings": true }, "snat": true }
+  ]
+}
+```
+
+### Key findings
+
+| Finding | Detail |
+|---|---|
+| DSR/TPROXY is **not** the issue | External traffic reaches Envoy without TPROXY problems when `hostNetwork.enabled=false` |
+| `hostNetwork=true` fails due to capability drop | `cilium-envoy-starter` drops `NET_BIND_SERVICE` before exec'ing Envoy — CapEff=0 on PID 7 |
+| `portmap` chaining fails to create CiliumEndpoints | Cilium does not create endpoints for Azure CNI pods when using `portmap` chaining, so EDS has zero backends |
+| `generic-veth` chaining creates CiliumEndpoints | With `generic-veth` + `customConf=true`, Cilium creates proper endpoints and EDS routing works |
+| Auto-chaining is not supported for `generic-veth` | Cilium docs confirm `generic-veth` requires `customConf=true`. The `findExistingCNIConfig` function cannot parse the Azure CNI `plugins[]` format. |
+| EDS sync delay after restart | Envoy's EDS cluster takes ~20-30s to reflect backend endpoints after Cilium agent restart + pod recreation |
 
 ## Prerequisites
 
@@ -24,9 +76,9 @@ Determine why the Cilium-built-in ingress controller (Envoy via CEC) does not se
 kubectl exec -n cilium ds/cilium -- ss -tlnp | grep envoy
 ```
 
-| Expected | If wrong → |
+| Expected | Actual |
 |---|---|
-| `0.0.0.0:8080` (sharedListenerPort ignored in chaining, CEC uses 8080) | **Theory A confirmed.** Envoy stuck on `127.0.0.1:12256`. Run `kubectl rollout restart -n cilium ds/cilium` up to 3 times and re-check. If it never transitions to `0.0.0.0:8080`, root cause is CEC convergence failure — stop. |
+| `0.0.0.0:8080` (sharedListenerPort ignored in chaining, CEC uses 8080) | ✅ `0.0.0.0:8080` — Envoy converged correctly with `hostNetwork=false`. With `hostNetwork=true`, `127.0.0.1:12256` due to `NET_BIND_SERVICE` capability drop. |
 
 ### Phase 2: Confirm Cilium ingress controller is active
 
@@ -109,41 +161,13 @@ helm upgrade cilium cilium/cilium --version 1.19.4 \
   --set ingressController.hostNetwork.enabled=false
 ```
 
-Wait for the CEC (CiliumEnvoyConfig) to reconcile and the LoadBalancer service to get a new IP (or reuse the existing one). Then re-run the tcpdump test (Phase 4).
-
-| Result | Conclusion |
-|---|---|
-| External traffic now works | hostNetwork mode was the root cause — either port collision (#5) or Envoy convergence failure (#1 specific to hostNetwork). DSR theory is not the primary issue. |
-| External traffic still fails, SYN arrives but no SYN-ACK | DSR/TPROXY theory (#6) is the most likely remaining cause. Cilium's eBPF TPROXY cannot redirect the non-local-destination SYN even through the standard service path. |
-| External traffic still fails, no SYN arrives | Re-check all earlier phases; likely a deployment/configuration issue unrelated to Cilium ingress. |
-
-If DSR/TPROXY is confirmed, move to Phase 6 as a final confirmation.
-
-### Phase 6: Repeat on Azure CNI powered by Cilium
-
-**Goal**: Confirm DSR/TPROXY theory by testing on a cluster where the platform manages the integration.
-
-Provision a second AKS cluster with `network_profile.network_data_plane = "cilium"` (Azure CNI powered by Cilium). On this cluster:
-
-1. AKS labels nodes with `kubernetes.azure.com/ebpf-dataplane=cilium` and evicts kube-proxy
-2. Azure CNI + Cilium are integrated by the cloud provider
-3. The Cilium daemonset may handle traffic differently at the host level
-
-Install Cilium via Helm with the same `ingressController.enabled=true` config. Repeat Phases 1-4 on this cluster.
-
-| Result | Conclusion |
-|---|---|
-| Cilium ingress works on powered-by-Cilium cluster | Strongly confirms DSR/TPROXY is the issue on vanilla AKS. The platform integration resolves the non-local-destination-IP problem. |
-| Cilium ingress also fails on powered-by-Cilium cluster | Root cause is something other than DSR/TPROXY (e.g., Envoy convergence, health probes, misconfiguration common to both). Narrow down using Phases 1-5 on this cluster. |
+**Result**: ✅ External traffic **worked** with `hostNetwork=false`. Envoy returned `server: envoy` HTTP 404 (no backends) at the LB IP. This disproves DSR/TPROXY as the root cause.
 
 ## Summary
 
-After executing Phases 1-4, you will know whether the SYN reaches the node. After Phase 5, you will know whether hostNetwork is the culprit. Phase 6 is the definitive test to validate or dismiss the DSR/TPROXY theory.
-
-| Signal | Most likely root cause |
+| Signal | Root cause |
 |---|---|
-| Envoy on `127.0.0.1:12256` | CEC convergence failure |
-| SYN arrives, no SYN-ACK, hostNetwork=on | DSR/TPROXY or port collision |
-| SYN arrives, no SYN-ACK, hostNetwork=off | DSR/TPROXY |
-| No SYN arrives at node | LB health probe or service selector misconfiguration |
-| Works only on powered-by-Cilium cluster | AKS-integrated Cilium handles the non-local-IP path; vanilla chaining cannot |
+| Envoy on `127.0.0.1:12256` (hostNetwork=true) | `NET_BIND_SERVICE` capability dropped by cilium-envoy-starter — CEC binds to `127.0.0.1` as fallback |
+| Envoy on `0.0.0.0:8080` (hostNetwork=false), no healthy upstream | `portmap` chaining: Cilium doesn't create CiliumEndpoints for Azure CNI pods, so EDS has zero backends |
+| Envoy on `0.0.0.0:8080`, healthy upstream | ✅ `generic-veth` chaining + `customConf=true` + custom ConfigMap — the working config |
+| Auto-chaining fails always | Cilium's `findExistingCNIConfig` can't match the Azure CNI `plugins[]` format, and `generic-veth` requires `customConf=true` per docs |

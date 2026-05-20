@@ -208,6 +208,31 @@ The split also avoids a single SKU dependency — if v6 spot becomes scarce the 
 
 Azure CNI pre-allocates a block of IPs per node from the subnet. With a single system node and spot at 0 when idle, the cluster had no room to schedule system DaemonSets or pod replicas during rolling updates. Two nodes provide enough headroom for control-plane components to survive a node drain.
 
+## Cilium ingress on vanilla AKS — empirical findings
+
+The Cilium-built-in ingress controller **works** on vanilla AKS with `generic-veth` chaining + custom CNI config.
+
+### Working setup
+
+- `cni.chainingMode=generic-veth`, `cni.customConf=true`, `cni.configMap=cni-configuration`
+- ConfigMap chains: `azure-vnet → cilium-cni → portmap`
+- `ingressController.hostNetwork.enabled=false` (required — `hostNetwork=true` fails due to `NET_BIND_SERVICE` capability drop in `cilium-envoy-starter`)
+- `cni.exclusive` and `cni.chainingTarget` are irrelevant with `customConf=true`
+
+### Why auto-chaining fails
+
+Cilium's `findExistingCNIConfig()` cannot parse the Azure CNI `plugins[]` list format against the chaining target. The docs confirm `generic-veth` **requires** `customConf=true`.
+
+### Why portmap chaining fails
+
+With `cni.chainingMode=portmap`, Cilium does not create CiliumEndpoints for Azure CNI-managed pods. Envoy's EDS clusters have zero backends → "no healthy upstream".
+
+### Full request path (working)
+
+```
+Internet → Azure LB (20.221.114.240) → NodePort → Cilium Envoy → EDS → backend pod (10.224.0.x:8080)
+```
+
 ## Known issues & workarounds
 
 ### Manual phased apply
