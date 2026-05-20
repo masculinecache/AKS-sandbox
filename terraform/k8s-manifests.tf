@@ -99,6 +99,7 @@ resource "kubernetes_manifest" "ingress_echo_nginx" {
 
   depends_on = [
     helm_release.ingress_nginx,
+    helm_release.echo_nginx,
     kubernetes_manifest.letsencrypt
   ]
 }
@@ -148,6 +149,68 @@ resource "kubernetes_manifest" "ingress_echo_cilium" {
 
   depends_on = [
     helm_release.ingress_nginx,
+    helm_release.echo_cilium,
+    kubernetes_manifest.letsencrypt
+  ]
+}
+
+# ── Cilium Ingress (optional — apply after Cilium is installed) ────────────────
+#
+# The acme.cert-manager.io/http01-edit-in-place annotation solves the TLS
+# chicken-and-egg problem: Cilium Envoy redirects HTTP→HTTPS when tls: is
+# configured, which breaks ACME HTTP01 challenges. This annotation makes
+# cert-manager issue a temporary self-signed certificate first, allowing
+# the redirect to work, then replace it with the real cert once issued.
+#
+# See docs/TEST_PLAN_CILIUM_INGRESS.md for full details.
+
+resource "kubernetes_manifest" "ingress_echo_cilium_cilium" {
+  manifest = {
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "Ingress"
+    metadata = {
+      name      = "echo-server-cilium-ingress"
+      namespace = "echo-server-cilium"
+      annotations = {
+        "cert-manager.io/cluster-issuer"            = "letsencrypt"
+        "acme.cert-manager.io/http01-edit-in-place" = "true"
+      }
+    }
+    spec = {
+      ingressClassName = "cilium"
+      rules = [
+        {
+          host = "echo-cilium.centralus.cloudapp.azure.com"
+          http = {
+            paths = [
+              {
+                path     = "/"
+                pathType = "Prefix"
+                backend = {
+                  service = {
+                    name = "echo-server-cilium"
+                    port = {
+                      number = 80
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+      tls = [
+        {
+          hosts      = ["echo-cilium.centralus.cloudapp.azure.com"]
+          secretName = "echo-cilium-tls"
+        }
+      ]
+    }
+  }
+
+  depends_on = [
+    helm_release.ingress_nginx,
+    helm_release.echo_cilium,
     kubernetes_manifest.letsencrypt
   ]
 }

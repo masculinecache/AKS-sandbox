@@ -54,35 +54,58 @@ terraform plan -out=tfplan
 # Review the plan before applying
 ```
 
-### Applying (three phases)
+### Applying (phased deployment)
 
-`kubernetes_manifest` resources cannot be planned before the AKS cluster exists.
-Use the wrapper script to handle the phases:
+`kubernetes_manifest` resources cannot be planned before the AKS cluster exists, and cert-manager CRDs must be registered before ClusterIssuer resources can be created.
+
+Use the Makefile for effortless phased deployment:
 
 ```bash
-./scripts/apply.sh     # phases 1 + 2 + 3
+make all    # Full deployment: phases 1-6 + verification
 ```
 
-Or manually:
+Or run phases individually:
+
+```bash
+make phase1   # Azure infrastructure (AKS cluster)
+make phase2   # cert-manager + CRD wait
+make phase3   # ingress-nginx + echo servers
+make phase4   # K8s manifests (ClusterIssuer, Ingresses)
+make phase5   # DNS labels on Load Balancer IPs
+make phase6   # Cilium with best practices
+make verify   # Verify endpoints are working
+```
+
+Or manually with terraform:
 
 ```bash
 cd terraform
 
 # Phase 1 — cluster infra
 terraform apply -auto-approve \
-  -target='azurerm_resource_group.main' \
-  -target='azurerm_kubernetes_cluster.main' \
-  -target='azurerm_kubernetes_cluster_node_pool.spot'
+  -target=azurerm_resource_group.main \
+  -target=azurerm_kubernetes_cluster.main \
+  -target=azurerm_kubernetes_cluster_node_pool.spot
 
-# Phase 2 — helm releases
+# Phase 2 — cert-manager + CRD registration
 terraform apply -auto-approve \
-  -target='helm_release.cert_manager' \
-  -target='helm_release.ingress_nginx' \
-  -target='helm_release.echo_nginx' \
-  -target='helm_release.echo_cilium'
+  -target=helm_release.cert_manager \
+  -target=time_sleep.wait_for_crds
 
-# Phase 3 — manifests (cluster + CRDs now exist)
+# Phase 3 — ingress-nginx + echo servers
+terraform apply -auto-approve \
+  -target=helm_release.ingress_nginx \
+  -target=helm_release.echo_nginx \
+  -target=helm_release.echo_cilium
+
+# Phase 4 — K8s manifests
 terraform apply -auto-approve
+
+# Phase 5 — DNS labels
+../scripts/set-dns-labels.sh
+
+# Phase 6 — Cilium
+../scripts/install-cilium.sh
 ```
 
 ### Destroying

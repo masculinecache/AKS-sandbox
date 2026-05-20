@@ -16,46 +16,75 @@ The Cilium ingress controller **works** on vanilla AKS with the right configurat
 
 ### Step 1: Create the CNI ConfigMap
 
-The ConfigMap must be created **before** installing Cilium, with the key `cni-config` in the `cilium` namespace:
+The ConfigMap must be created **before** installing Cilium, with the key `cni-config` in the `kube-system` namespace:
 
 ```bash
-kubectl create namespace cilium
-
-kubectl create configmap -n cilium cni-configuration --from-literal=cni-config='{
-  "cniVersion": "0.3.0",
+kubectl create configmap cilium-cni-configuration -n kube-system \
+  --from-literal=cni-config='{
+  "cniVersion": "0.3.1",
   "name": "azure",
   "plugins": [
-    { "type": "azure-vnet", "mode": "transparent",
+    {
+      "type": "azure-vnet",
+      "mode": "transparent",
       "ipsToRouteViaHost": ["169.254.20.10"],
-      "ipam": { "type": "azure-vnet-ipam" } },
-    { "type": "cilium-cni", "chaining-mode": "generic-veth" },
-    { "type": "portmap",
-      "capabilities": { "portMappings": true }, "snat": true }
+      "ipam": { "type": "azure-vnet-ipam" }
+    },
+    {
+      "type": "portmap",
+      "capabilities": { "portMappings": true },
+      "snat": true
+    },
+    {
+      "type": "cilium-cni",
+      "enable-debug": false
+    }
   ]
 }'
 ```
 
+**Critical**: The key name must be exactly `cni-config`. Cilium mounts the ConfigMap at `/tmp/cni-configuration/` and expects a file named `cni-config`. Using `cni-conf.json` or any other key name fails silently.
+
 ### Step 2: Install Cilium
+
+Use the provided script which auto-detects the VNet CIDR and applies best-practice settings:
+
+```bash
+./scripts/install-cilium.sh
+```
+
+Or manually:
 
 ```bash
 helm repo add cilium https://helm.cilium.io/
+helm repo update cilium
 
 helm install cilium cilium/cilium --version 1.19.4 \
-  --namespace cilium \
-  --set kubeProxyReplacement=true \
-  --set routingMode=native \
-  --set ipv4NativeRoutingCIDR=10.224.0.0/12 \
-  --set ipam.mode=cluster-pool \
+  --namespace kube-system \
   --set cni.chainingMode=generic-veth \
   --set cni.customConf=true \
-  --set cni.configMap=cni-configuration \
+  --set cni.configMap=cilium-cni-configuration \
+  --set routingMode=native \
+  --set ipv4NativeRoutingCIDR=10.224.0.0/12 \
+  --set ipam.mode=kubernetes \
   --set bpf.masquerade=false \
-  --set enable-masquerade-to-route-source=true \
+  --set enableIPv4Masquerade=true \
+  --set enableMasqueradeToRouteSource=true \
+  --set kubeProxyReplacement=true \
+  --set loadBalancer.mode=dsr \
   --set ingressController.enabled=true \
-  --set ingressController.hostNetwork.enabled=false \
-  --set ingressController.loadbalancerMode=shared \
-  --set nodeinit.enabled=true
+  --set ingressController.default=false \
+  --set ingressController.enforceHttps=true \
+  --set ingressController.loadbalancerMode=dedicated \
+  --set hubble.enabled=false \
+  --set operator.replicas=1
 ```
+
+**Key settings for Azure CNI + DSR**:
+- `routingMode=native` — Required for DSR mode (disables vxlan tunneling)
+- `ipv4NativeRoutingCIDR` — Must match the AKS VNet CIDR (auto-detected by script)
+- `loadBalancer.mode=dsr` — Direct Server Return for optimal performance
+- `ipam.mode=kubernetes` — Azure CNI handles IPAM, not Cilium
 
 ⚠️ **Note**: After install, wait ~30s for EDS to sync before testing. Early requests may return `503 Service Unavailable — upstream connect error`.
 
@@ -90,10 +119,10 @@ kubectl get ciliumendpoint -n cert-manager
 | ConfigMap key must be `cni-config` | The Cilium agent mounts the ConfigMap at `/tmp/cni-configuration/` and expects a file named `cni-config`. Using `--from-literal=config=...` fails silently. |
 | ConfigMap must be in `cilium` namespace | Helm sets `cni.configMap=cni-configuration`, but the Cilium agent looks for it in its own namespace (`cilium`), not `kube-system`. |
 | `kubeProxyReplacement=true` is required | The initial Cilium install with `kubeProxyReplacement=true` removes AKS's kube-proxy DaemonSet. Switching to `false` later leaves no kube-proxy replacement, breaking NodePort/LB forwarding. |
-| `enable-masquerade-to-route-source=true` fixes cross-node Envoy→backend connectivity | Without this, cilium-envoy's `reserved:ingress` identity egress connections to pods on other nodes time out (`cx_connect_fail`). The setting causes outbound traffic from Envoy to be masqueraded to the local route source IP, allowing return traffic to be properly routed. Note: incompatible with `bpf.masquerade=true`. |
+| `enableMasqueradeToRouteSource=true` fixes cross-node Envoy→backend connectivity | Without this, cilium-envoy's `reserved:ingress` identity egress connections to pods on other nodes time out (`cx_connect_fail`). The setting causes outbound traffic from Envoy to be masqueraded to the local route source IP, allowing return traffic to be properly routed. Note: incompatible with `bpf.masquerade=true`. |
 | **cert-manager needs CiliumEndpoint** (NEW) | Pods without CiliumEndpoints cannot reach services through Cilium's L7 LB. cert-manager's ACME self-check fails with `connection refused` until restarted after Cilium install. |
 | **Azure DNS labels are single-PIP** (NEW) | Each Azure public IP supports exactly one DNS label. Reassigning requires removing from old PIP first: `--set dnsSettings=null`. |
-| **Cilium ingress TLS chicken-and-egg** (NEW) | A Cilium Ingress with `tls:` blocks ACME HTTP-01 challenges because Envoy redirects HTTP→HTTPS before the certificate exists. Issue certificate first (via nginx ingress or temporarily remove TLS), then add TLS config. |
+| **Cilium ingress TLS chicken-and-egg** | A Cilium Ingress with `tls:` blocks ACME HTTP-01 challenges because Envoy redirects HTTP→HTTPS before the certificate exists. **Fix**: Add `acme.cert-manager.io/http01-edit-in-place: "true"` annotation — cert-manager issues a temporary self-signed cert first, allowing the redirect to work, then replaces it with the real cert. |
 
 ---
 
@@ -110,83 +139,82 @@ kubectl get ciliumendpoint -n cert-manager
 
 ## Migration plan flow
 
+Use the Makefile for effortless deployment:
+
+```bash
+make all    # Full deployment: phases 1-6 + verification
+```
+
+Or run phases individually:
+
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    Phase 0: Base cluster (no Cilium)                │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
-│  │  AKS cluster │───→│ ingress-nginx│───→│  cert-manager 1.9.1  │  │
-│  │  Azure CNI   │    │  (class:nginx│    │  + ClusterIssuer     │  │
-│  └──────────────┘    └──────────────┘    └──────────────────────┘  │
-│                           │                                         │
-│                           ↓                                         │
-│                    ┌──────────────┐                                 │
-│                    │ echo-server  │                                 │
-│                    │ (nginx ingress│                                │
-│                    └──────────────┘                                 │
+│                    Phase 1: Azure Infrastructure                    │
+│  make phase1                                                        │
+│                                                                     │
+│  Creates: Resource Group, AKS Cluster, Spot Node Pool               │
 └─────────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    Phase 1: Install Cilium                          │
+│                    Phase 2: cert-manager                            │
+│  make phase2                                                        │
 │                                                                     │
-│  1. Create cilium namespace + cni-configuration ConfigMap           │
-│  2. helm install cilium (generic-veth chaining)                     │
-│  3. Wait for Cilium pods Ready (~60s)                               │
-│  4. Wait for Cilium ingress LB IP assignment (~60s)                 │
+│  Installs cert-manager Helm chart + waits for CRDs                  │
+│  (Required before any kubernetes_manifest resources)                │
+└─────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Phase 3: ingress-nginx + echo servers            │
+│  make phase3                                                        │
+│                                                                     │
+│  Installs ingress-nginx, echo-server-nginx, echo-server-cilium    │
+│  (Creates namespaces for ingress resources)                         │
+└─────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Phase 4: K8s manifests                           │
+│  make phase4                                                        │
+│                                                                     │
+│  Applies: ClusterIssuer, Ingresses (nginx + cilium)                 │
+│  Certificates begin ACME challenge process                          │
+└─────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Phase 5: DNS labels                              │
+│  make phase5                                                        │
+│                                                                     │
+│  Auto-discovers LoadBalancer IPs and sets Azure DNS labels          │
+│  (echo-nginx → ingress-nginx LB, echo-cilium → Cilium LB)         │
+│  Required for Let's Encrypt ACME challenges to resolve              │
+└─────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Phase 6: Cilium                                  │
+│  make phase6                                                        │
+│                                                                     │
+│  Installs Cilium with:                                              │
+│  - generic-veth Azure CNI chaining                                  │
+│  - Native routing (required for DSR)                                │
+│  - DSR load balancer mode                                           │
+│  - Ingress controller with dedicated LB                             │
 │                                                                     │
 │  ⚠️ cert-manager pods created BEFORE Cilium have NO CiliumEndpoint │
+│     Run: make restart-cert-manager                                  │
 └─────────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    Phase 2: Fix cert-manager identity               │
+│                    Verify                                           │
+│  make verify                                                        │
 │                                                                     │
-│  kubectl delete pod -n cert-manager -l app=cert-manager             │
-│                                                                     │
-│  → New pod gets CiliumEndpoint (Security Identity assigned)         │
-│  → ACME self-check can now reach Cilium Envoy                       │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Phase 3: Assign DNS labels                       │
-│                                                                     │
-│  Azure public IP: one DNS label per PIP                             │
-│                                                                     │
-│  # Remove from old PIP (if reassigning)                             │
-│  az network public-ip update -g <rg> -n <old-pip> \                │
-│    --set dnsSettings=null                                           │
-│                                                                     │
-│  # Add to new PIP                                                   │
-│  az network public-ip update -g <rg> -n <new-pip> \                │
-│    --dns-name "echo-cilium"                                         │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Phase 4: Issue certificates                      │
-│                                                                     │
-│  Option A (recommended):                                            │
-│    1. Issue certificate via ingress-nginx (class: nginx)            │
-│    2. Verify: kubectl get certificate -A → Ready=True               │
-│                                                                     │
-│  Option B (Cilium direct):                                          │
-│    1. Create Cilium Ingress WITHOUT tls: block                      │
-│    2. Wait for certificate issuance                                 │
-│    3. Patch Ingress to add tls: block                               │
-│                                                                     │
-│  ⚠️ Do NOT create Cilium Ingress with tls: before cert exists      │
-│     → Envoy redirects HTTP→HTTPS → ACME challenge fails             │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Phase 5: Verify dual ingress                     │
-│                                                                     │
-│  echo-nginx.centralus.cloudapp.azure.com → ingress-nginx LB         │
-│  echo-cilium.centralus.cloudapp.azure.com → Cilium LB               │
-│                                                                     │
-│  Both: curl -sv https://<domain>/ → HTTP 200, valid Let's Encrypt  │
+│  Tests both endpoints with valid TLS certificates:                  │
+│  - https://echo-nginx.centralus.cloudapp.azure.com                  │
+│  - https://echo-cilium.centralus.cloudapp.azure.com                 │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -380,7 +408,7 @@ helm upgrade cilium cilium/cilium --version 1.19.4 \
 | Auto-chaining fails always | Cilium's `findExistingCNIConfig` can't match the Azure CNI `plugins[]` format, and `generic-veth` requires `customConf=true` per docs |
 | `endpointRoutes.enabled=true` not required | Azure CNI VNet IPs are directly routable; per-endpoint routes redundant. Tested `InstallEndpointRoute: false`. |
 | cert-manager ACME self-check: `connection refused` | cert-manager deployed before Cilium → no CiliumEndpoint → traffic dropped by BPF. **Fix**: restart cert-manager after Cilium install. |
-| Cilium Ingress with TLS blocks ACME challenges | Envoy redirects HTTP→HTTPS before certificate exists. **Fix**: issue cert first, then add TLS config. |
+| Cilium Ingress with TLS blocks ACME challenges | Envoy redirects HTTP→HTTPS before certificate exists. **Fix**: Add `acme.cert-manager.io/http01-edit-in-place: "true"` on the Ingress. This auto-propagates to `cert-manager.io/issue-temporary-certificate: "true"` on the Certificate, creating a temp self-signed cert that allows the redirect to work. |
 | Azure DNS label conflict | One DNS label per public IP. **Fix**: remove from old PIP before adding to new PIP. |
 
 ---
