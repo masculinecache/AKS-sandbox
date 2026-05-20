@@ -19,7 +19,7 @@ Internet
 | Component | Chart | Namespace | Purpose |
 |---|---|---|---|
 | AKS cluster | — | — | Azure Kubernetes Service, Azure CNI, 1.34.6 |
-| cert-manager | `cert-manager` 1.16.5 | `cert-manager` | Let's Encrypt TLS automation |
+| cert-manager | `cert-manager` 1.9.1 | `cert-manager` | Let's Encrypt TLS automation |
 | ingress-nginx | `ingress-nginx` 4.15.1 | `ingress-nginx` | Ingress controller (class: nginx) |
 | echo-server-nginx | `echo-server` 0.5.0 | `echo-server-nginx` | Test app at echo-nginx.* |
 | echo-server-cilium | `echo-server` 0.5.0 | `echo-server-cilium` | Test app at echo-cilium.* |

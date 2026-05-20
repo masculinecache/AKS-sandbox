@@ -17,6 +17,9 @@ provider "helm" {
 # ── ClusterIssuers ────────────────────────────────────────────────────────────
 
 resource "kubernetes_manifest" "letsencrypt" {
+  field_manager {
+    force_conflicts = true
+  }
   manifest = {
     apiVersion = "cert-manager.io/v1"
     kind       = "ClusterIssuer"
