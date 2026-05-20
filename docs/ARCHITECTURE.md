@@ -135,6 +135,26 @@ Both apps share `ingress-nginx`. The `echo-cilium` name is retained for historic
 ./scripts/apply.sh --plan      # plan all phases (dry-run)
 ```
 
+### VM SKU selection
+
+| Pool | SKU | Rationale |
+|---|---|---|
+| **System** | `Standard_D2s_v6` | Latest D-series (6th gen, Intel Xeon Platinum). Best price/performance in `centralus` — more cores per vCPU at the same price as v5. Suitable for control-plane workloads that must stay up. |
+| **Spot** | `Standard_D2s_v5` | Previous gen, but **spot capacity is reliably available**. The v6 spot pool is newer and often has zero available capacity in `centralus`. For burst/evictable workloads, v5 is the pragmatic choice. |
+
+The split also avoids a single SKU dependency — if v6 spot becomes scarce the cluster still bursts on v5, and vice versa. For this sandbox workload the performance difference is negligible; the choice is driven entirely by spot-market availability.
+
+**If availability becomes a problem:**
+- Both pools can be unified to `D2s_v5` (broader capacity, trivially slower).
+- System pool could use `D2s_v6` with spot on `D2s_v5` as-is (current best-practice default).
+- If spot reliability for v6 improves in the future, both can migrate to `D2s_v6`.
+
+### System node count (2 instead of 1)
+
+Azure CNI pre-allocates a block of IPs per node from the subnet. With a single system node and spot at 0 when idle, the cluster had no room to schedule system DaemonSets or pod replicas during rolling updates. Two nodes provide enough headroom for control-plane components to survive a node drain.
+
+## Known issues & workarounds
+
 ### Manual phased apply
 
 ```bash
