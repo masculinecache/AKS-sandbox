@@ -105,7 +105,7 @@ Both use the same `letsencrypt` ClusterIssuer with HTTP-01 challenge. echo-ciliu
 The sandbox targets `allsynx-dev-test` as a structural mirror. The table below evaluates networking equivalence — anything not listed is either identical (service CIDR, DNS IP, LB SKU, outbound type, kube-proxy iptables mode, HostPort usage, network policies) or non-structural (ingress count).
 
 | Aspect | Target (allsynx-dev-test) | Sandbox | Status |
-|---|---|---|---|---|---|
+|---|---|---|---|
 | CNI | Pure Azure CNI, no overlay, no pluginMode | Pure Azure CNI, no overlay, no pluginMode | ✅ Match |
 | kube-proxy Cilium affinity | `kubernetes.azure.com/ebpf-dataplane NotIn [cilium]` (inert — no labeled nodes) | AKS default (same template) | ✅ Inert on both |
 | Cilium deployed | No | Yes (CNI + ingress controller) | ⚠️ Not equivalent — kept for Cilium ingress testing |
