@@ -32,75 +32,77 @@ Internet
 - kubectl
 - Helm 3
 - make
-- Cilium CLI (`cilium`) — optional, for status checks
 
 ## Deployment
 
-The deployment is split into phases to handle terraform ordering constraints:
+### Step 1: Base cluster + ingress-nginx + cert-manager + echo-nginx
 
 ```bash
-# Full deployment (all phases)
-make all
-
-# Or run phases individually:
-make phase1   # Create Azure infrastructure (AKS cluster)
-make phase2   # Install cert-manager
-make phase3   # Install ingress-nginx + echo servers
-make phase4   # Apply K8s manifests (ClusterIssuer, Ingresses)
-make phase5   # Set DNS labels on Load Balancer IPs
-make phase6   # Install Cilium with best practices
-make verify   # Verify endpoints are working
+make step1
 ```
 
-### Phase Details
+This creates:
+- AKS cluster with Azure CNI
+- cert-manager with Let's Encrypt ClusterIssuer
+- ingress-nginx controller
+- echo-server-nginx with TLS via nginx ingress
+- echo-server-cilium app (namespace + deployment, no ingress yet)
+- DNS label for echo-nginx
 
-**Phase 1** — Creates the Azure resource group, AKS cluster, and spot node pool.
+After step 1, verify:
+```bash
+curl -I https://echo-nginx.centralus.cloudapp.azure.com
+# Expected: HTTP/2 200
+```
 
-**Phase 2** — Installs cert-manager and waits for CRDs to register. This must happen before any `kubernetes_manifest` resources that reference cert-manager CRDs.
+### Step 2: Install Cilium + create echo-cilium ingress
 
-**Phase 3** — Installs ingress-nginx and the echo server applications.
+```bash
+make step2
+```
 
-**Phase 4** — Applies Kubernetes manifests (ClusterIssuer, Ingress resources). These depend on both cert-manager CRDs and the echo-server namespaces.
-
-**Phase 5** — Automatically discovers the LoadBalancer public IPs and sets Azure DNS labels (`echo-nginx` and `echo-cilium`). This is required for Let's Encrypt ACME challenges to resolve.
-
-**Phase 6** — Installs Cilium with:
-- Azure CNI `generic-veth` chaining
-- Native routing (required for DSR mode)
+This installs:
+- Cilium with Azure CNI `generic-veth` chaining
+- Native routing (auto-detected VNet CIDR)
 - DSR load balancer mode
-- Ingress controller with dedicated LB mode
-- Correct ConfigMap key name (`cni-config`)
+- Cilium ingress controller
+- Cilium ingress for echo-cilium with `http01-edit-in-place` annotation
+- DNS label for echo-cilium
+- Restarts cert-manager to create CiliumEndpoints
 
-### Manual Terraform (without Make)
+After step 2, verify:
+```bash
+curl -I https://echo-cilium.centralus.cloudapp.azure.com
+# Expected: HTTP/1.1 200, server: envoy
+```
+
+### Full deployment
 
 ```bash
-cd terraform
-cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your subscription ID
-terraform init
-
-# Phase 1: Infrastructure
-terraform apply -target=azurerm_resource_group.main \
-  -target=azurerm_kubernetes_cluster.main \
-  -target=azurerm_kubernetes_cluster_node_pool.spot
-
-# Phase 2: cert-manager
-terraform apply -target=helm_release.cert_manager -target=time_sleep.wait_for_crds
-
-# Phase 3: ingress-nginx + echo servers
-terraform apply -target=helm_release.ingress_nginx \
-  -target=helm_release.echo_nginx \
-  -target=helm_release.echo_cilium
-
-# Phase 4: K8s manifests
-terraform apply
-
-# Phase 5: DNS labels
-../scripts/set-dns-labels.sh
-
-# Phase 6: Cilium
-../scripts/install-cilium.sh
+make all    # Runs step1 + step2 + verify
 ```
+
+### Verify endpoints
+
+```bash
+make verify
+```
+
+## Step Details
+
+**Step 1** — Base infrastructure:
+1. Azure resource group + AKS cluster + spot node pool
+2. cert-manager Helm chart + 30s CRD wait
+3. ingress-nginx + echo-server-nginx + echo-server-cilium Helm charts
+4. ClusterIssuer + echo-nginx Ingress (kubernetes_manifest)
+5. DNS label on ingress-nginx LB IP
+
+**Step 2** — Cilium installation:
+1. Create CNI ConfigMap (`cni-config` key)
+2. Install Cilium with native routing + DSR
+3. Restart cert-manager pods (creates CiliumEndpoints)
+4. Create Cilium ingress for echo-cilium
+5. DNS label on Cilium LB IP
 
 ## Cilium Configuration
 
@@ -113,23 +115,12 @@ Cilium is installed with best-practice settings for Azure CNI chaining:
 | `cni.configMap` | `cilium-cni-configuration` | Source ConfigMap |
 | `routingMode` | `native` | Required for DSR mode |
 | `ipv4NativeRoutingCIDR` | Auto-detected | VNet CIDR for native routing |
-| `loadBalancer.mode` | `dsr` | Direct Server Return for performance |
+| `loadBalancer.mode` | `dsr` | Direct Server Return |
 | `kubeProxyReplacement` | `true` | eBPF-based kube-proxy replacement |
-| `bpf.masquerade` | `false` | Use iptables masquerade (Azure CNI compatible) |
+| `bpf.masquerade` | `false` | Use iptables (Azure CNI compatible) |
 | `enableMasqueradeToRouteSource` | `true` | Cross-node Envoy connectivity |
 | `ingressController.enabled` | `true` | Enable Cilium ingress controller |
 | `ingressController.loadbalancerMode` | `dedicated` | Dedicated LB per ingress |
-
-### Cilium Ingress TLS
-
-The Cilium ingress uses the `acme.cert-manager.io/http01-edit-in-place: "true"` annotation to solve the TLS chicken-and-egg problem:
-
-1. cert-manager issues a temporary self-signed certificate
-2. Cilium Envoy serves HTTPS with the temp cert
-3. ACME challenge follows the HTTP→HTTPS redirect successfully
-4. Real Let's Encrypt certificate replaces the temp cert
-
-No workarounds needed — certificate issuance works directly through the Cilium ingress.
 
 ## Ingress URLs
 
@@ -139,28 +130,15 @@ No workarounds needed — certificate issuance works directly through the Cilium
 ## Useful Commands
 
 ```bash
-# Check Cilium status
-make cilium-status
-
-# Restart cert-manager (creates CiliumEndpoints after Cilium install)
-make restart-cert-manager
-
-# Re-apply K8s manifests after changes
-make reapply-manifests
-
-# Verify endpoints
-make verify
-```
-
-## Cleanup
-
-```bash
-make destroy    # Destroy all terraform resources
-make clean      # Destroy + clean kubeconfig
+make cilium-status          # Check Cilium status
+make restart-cert-manager   # Restart cert-manager (after Cilium install)
+make verify                 # Verify both endpoints
+make destroy                # Destroy all resources
+make clean                  # Destroy + clean kubeconfig
 ```
 
 ## Notes
 
-- The spot node pool may have zero nodes when idle (`min_count = 0`). Pods with tolerations for `kubernetes.azure.com/scalesetpriority=spot:NoSchedule` will be scheduled there.
-- cert-manager pods deployed before Cilium will not have CiliumEndpoints. Restart cert-manager after Cilium installation: `make restart-cert-manager`
-- DNS labels are set automatically in Phase 5, but may take a few minutes to propagate.
+- The spot node pool may have zero nodes when idle (`min_count = 0`).
+- cert-manager pods deployed before Cilium have no CiliumEndpoints. `make step2` automatically restarts them.
+- DNS labels are set automatically but may take a few minutes to propagate.

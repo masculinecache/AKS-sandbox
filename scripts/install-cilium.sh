@@ -98,7 +98,10 @@ ipv4NativeRoutingCIDR: "${VNET_CIDR}"
 
 # IPAM not needed with Azure CNI chaining (Azure CNI handles IPAM)
 ipam:
-  mode: kubernetes
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList: ["10.244.0.0/16"]
+    clusterPoolIPv4MaskSize: 24
 
 # Disable BPF masquerade - use iptables-based masquerade
 # Required for Azure CNI chaining compatibility
@@ -120,7 +123,7 @@ ingressController:
   enabled: true
   default: false
   enforceHttps: true
-  loadbalancerMode: dedicated
+  loadbalancerMode: shared
 
 # Disable Hubble (not needed for this sandbox)
 hubble:
@@ -153,7 +156,7 @@ echo "  ✅ Cilium pods are ready"
 # Verify Cilium status
 echo ""
 echo "  Cilium status:"
-cilium status --brief 2>/dev/null || kubectl exec -n kube-system -l k8s-app=cilium -- cilium status --brief
+cilium status --brief 2>/dev/null || kubectl exec -n kube-system ds/cilium -- cilium status --brief
 
 echo ""
 echo "🎉 Cilium ${CILIUM_VERSION} installed successfully with:"

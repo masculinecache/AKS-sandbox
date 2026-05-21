@@ -66,7 +66,9 @@ helm install cilium cilium/cilium --version 1.19.4 \
   --set cni.configMap=cilium-cni-configuration \
   --set routingMode=native \
   --set ipv4NativeRoutingCIDR=10.224.0.0/12 \
-  --set ipam.mode=kubernetes \
+  --set ipam.mode=cluster-pool \
+  --set ipam.operator.clusterPoolIPv4PodCIDRList='["10.244.0.0/16"]' \
+  --set ipam.operator.clusterPoolIPv4MaskSize=24 \
   --set bpf.masquerade=false \
   --set enableIPv4Masquerade=true \
   --set enableMasqueradeToRouteSource=true \
@@ -75,7 +77,7 @@ helm install cilium cilium/cilium --version 1.19.4 \
   --set ingressController.enabled=true \
   --set ingressController.default=false \
   --set ingressController.enforceHttps=true \
-  --set ingressController.loadbalancerMode=dedicated \
+  --set ingressController.loadbalancerMode=shared \
   --set hubble.enabled=false \
   --set operator.replicas=1
 ```
@@ -84,7 +86,8 @@ helm install cilium cilium/cilium --version 1.19.4 \
 - `routingMode=native` — Required for DSR mode (disables vxlan tunneling)
 - `ipv4NativeRoutingCIDR` — Must match the AKS VNet CIDR (auto-detected by script)
 - `loadBalancer.mode=dsr` — Direct Server Return for optimal performance
-- `ipam.mode=kubernetes` — Azure CNI handles IPAM, not Cilium
+- `ingressController.loadbalancerMode=shared` — Dedicated mode gets internal Azure LB IP; shared mode creates a single public LB in kube-system
+- `ipam.mode=cluster-pool` — Required on Azure CNI (kubernetes mode fails with "PodCIDR not available")
 
 ⚠️ **Note**: After install, wait ~30s for EDS to sync before testing. Early requests may return `503 Service Unavailable — upstream connect error`.
 
@@ -123,6 +126,10 @@ kubectl get ciliumendpoint -n cert-manager
 | **cert-manager needs CiliumEndpoint** (NEW) | Pods without CiliumEndpoints cannot reach services through Cilium's L7 LB. cert-manager's ACME self-check fails with `connection refused` until restarted after Cilium install. |
 | **Azure DNS labels are single-PIP** (NEW) | Each Azure public IP supports exactly one DNS label. Reassigning requires removing from old PIP first: `--set dnsSettings=null`. |
 | **Cilium ingress TLS chicken-and-egg** | A Cilium Ingress with `tls:` blocks ACME HTTP-01 challenges because Envoy redirects HTTP→HTTPS before the certificate exists. **Fix**: Add `acme.cert-manager.io/http01-edit-in-place: "true"` annotation — cert-manager issues a temporary self-signed cert first, allowing the redirect to work, then replaces it with the real cert. |
+| **`loadBalancer.mode=dedicated` gets internal Azure LB IP** | With `dedicated` mode, Cilium creates a per-namespace LoadBalancer service that Azure assigns an internal IP (172.16.x.x) to. **Fix**: Use `loadBalancer.mode=shared` — creates a single shared LoadBalancer in `kube-system` namespace with a public IP. |
+| **`ipam.mode=kubernetes` fails with "PodCIDR not available"** | On Azure CNI, `ipam.mode=kubernetes` causes Cilium agents to fail with "required IPv4 PodCIDR not available". **Fix**: Use `ipam.mode=cluster-pool` with `clusterPoolIPv4PodCIDRList: ["10.244.0.0/16"]` and `clusterPoolIPv4MaskSize: 24`. |
+| **ingress-nginx needs restart after Cilium install** | The nginx ingress controller deployed before Cilium has no CiliumEndpoint. Without it, Azure LB health probes to the node fail and external traffic is dropped. **Fix**: `kubectl rollout restart deployment -n ingress-nginx ingress-nginx-controller` |
+| **Cilium shared ingress service is in `kube-system`** | With `loadBalancer.mode=shared`, the Cilium ingress LoadBalancer service is named `cilium-ingress` in the `kube-system` namespace, not in the application namespace. DNS label scripts must look there. |
 
 ---
 
